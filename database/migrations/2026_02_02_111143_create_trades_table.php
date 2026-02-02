@@ -31,8 +31,6 @@ return new class extends Migration
             $table->json('meta')->nullable();
 
             $table->index(['symbol_code', 'timeframe_code']);
-            $table->index(['status']);
-            $table->index(['opened_at']);
             $table->timestamps();
         });
     }
