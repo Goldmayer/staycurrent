@@ -40,11 +40,17 @@ class Trade extends Model
 
     public function isOpen(): bool
     {
-        return $this->status === TradeStatus::OPEN || $this->status === TradeStatus::OPEN->value;
+        if ($this->status instanceof \App\Enums\TradeStatus) {
+            return $this->status === TradeStatus::OPEN;
+        }
+        return (string) $this->status === TradeStatus::OPEN->value;
     }
 
     public function isClosed(): bool
     {
-        return $this->status === TradeStatus::CLOSED || $this->status === TradeStatus::CLOSED->value;
+        if ($this->status instanceof \App\Enums\TradeStatus) {
+            return $this->status === TradeStatus::CLOSED;
+        }
+        return (string) $this->status === TradeStatus::CLOSED->value;
     }
 }
