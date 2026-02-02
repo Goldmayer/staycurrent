@@ -25,15 +25,26 @@ class Trade extends Model
         'opened_at' => 'datetime',
         'closed_at' => 'datetime',
         'meta' => 'array',
+        'status' => \App\Enums\TradeStatus::class,
     ];
+
+    public function isLong(): bool
+    {
+        return $this->side === 'buy';
+    }
+
+    public function isShort(): bool
+    {
+        return $this->side === 'sell';
+    }
 
     public function isOpen(): bool
     {
-        return $this->status === TradeStatus::OPEN->value;
+        return $this->status === TradeStatus::OPEN || $this->status === TradeStatus::OPEN->value;
     }
 
     public function isClosed(): bool
     {
-        return $this->status === TradeStatus::CLOSED->value;
+        return $this->status === TradeStatus::CLOSED || $this->status === TradeStatus::CLOSED->value;
     }
 }
