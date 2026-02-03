@@ -1,10 +1,14 @@
 {
     "agents": [
-        "junie"
+        "copilot",
+        "gemini"
     ],
     "guidelines": true,
     "herd_mcp": false,
     "mcp": true,
+    "packages": [
+        "filament/filament"
+    ],
     "sail": false,
     "skills": [
         "fluxui-development",
