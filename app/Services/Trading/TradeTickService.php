@@ -50,7 +50,7 @@ class TradeTickService
         foreach ($symbols as $symbol) {
             $symbolsProcessed++;
 
-            foreach (TimeframeCode::cases() as $timeframe) {
+            foreach ([TimeframeCode::M5] as $timeframe) {
                 // Check if there's already an OPEN trade for this symbol+timeframe
                 $existingTrade = Trade::where([
                     ['symbol_code', '=', $symbol->code],
