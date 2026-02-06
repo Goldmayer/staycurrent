@@ -173,6 +173,8 @@ class TradeCloseService
                     'reason' => 'ha_reversal',
                     'quote_pulled_at' => $pulledAt->toDateTimeString(),
                     'timeframe' => (string) $trade->timeframe_code,
+                    'ha_prev_dir' => $prevDir,
+                    'ha_curr_dir' => $currDir,
                 ];
 
                 $trade->status = TradeStatus::CLOSED;

@@ -30,6 +30,9 @@
                             Exit Price
                         </th>
                         <th scope="col" class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                            Unrealized
+                        </th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
                             P&L Points
                         </th>
                     </tr>
@@ -66,6 +69,10 @@
                             </td>
                             <td class="whitespace-nowrap px-4 py-3 text-sm text-neutral-900 dark:text-neutral-100">
                                 {{ $trade->exit_price ? number_format($trade->exit_price, 8) : '—' }}
+                            </td>
+                            <td class="whitespace-nowrap px-4 py-3 text-sm font-medium
+                                {{ $trade->unrealized_points > 0 ? 'text-green-600 dark:text-green-400' : ($trade->unrealized_points < 0 ? 'text-red-600 dark:text-red-400' : 'text-neutral-900 dark:text-neutral-100') }}">
+                                {{ $trade->isOpen() ? ($trade->unrealized_points > 0 ? '+' : '') . number_format($trade->unrealized_points, 2) : '—' }}
                             </td>
                             <td class="whitespace-nowrap px-4 py-3 text-sm font-medium
                                 {{ $trade->realized_points > 0 ? 'text-green-600 dark:text-green-400' : ($trade->realized_points < 0 ? 'text-red-600 dark:text-red-400' : 'text-neutral-900 dark:text-neutral-100') }}">

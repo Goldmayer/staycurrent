@@ -52,14 +52,17 @@ class TradeTickService
                 }
 
                 // Check if we have current price and enough candles
-                $currentPrice = $this->getCurrentPrice($symbol->code);
+                $quote = $this->getQuote($symbol->code);
+                $currentPrice = $quote?->price;
+                $quotePulledAt = $quote?->pulled_at ? $quote->pulled_at->toDateTimeString() : null;
                 $candleCount = $this->getCandleCount($symbol->code, $timeframe->value);
 
                 if ($currentPrice && $candleCount >= self::MIN_CANDLES) {
                     // Determine side based on deterministic logic (symbol hash + timeframe)
                     $side = $this->determineSide($symbol->code, $timeframe->value);
+                    $hash = crc32($symbol->code . '|' . $timeframe->value);
 
-                    $this->openTrade($symbol->code, $timeframe->value, $side, $currentPrice);
+                    $this->openTrade($symbol->code, $timeframe->value, $side, $currentPrice, $quotePulledAt, $hash, $candleCount);
                     $tradesOpened++;
                 }
             }
@@ -79,6 +82,14 @@ class TradeTickService
     {
         $quote = SymbolQuote::where('symbol_code', $symbolCode)->first();
         return $quote ? $quote->price : null;
+    }
+
+    /**
+     * Get quote record for a symbol
+     */
+    private function getQuote(string $symbolCode): ?SymbolQuote
+    {
+        return SymbolQuote::where('symbol_code', $symbolCode)->first();
     }
 
     /**
@@ -106,7 +117,7 @@ class TradeTickService
     /**
      * Open a new trade
      */
-    private function openTrade(string $symbolCode, string $timeframeCode, string $side, float $entryPrice): void
+    private function openTrade(string $symbolCode, string $timeframeCode, string $side, float $entryPrice, ?string $quotePulledAt, int $hash, int $candleCount): void
     {
         Trade::create([
             'symbol_code' => $symbolCode,
@@ -121,6 +132,15 @@ class TradeTickService
                 'source' => 'trade:tick',
                 'reason' => 'placeholder_signal',
                 'timeframe' => $timeframeCode,
+                'open' => [
+                    'source' => 'trade:tick',
+                    'reason' => 'placeholder_signal',
+                    'timeframe' => $timeframeCode,
+                    'quote_pulled_at' => $quotePulledAt,
+                    'deterministic_side_hash' => $hash,
+                    'min_candles_required' => self::MIN_CANDLES,
+                    'candles_count_at_open' => $candleCount,
+                ],
             ],
         ]);
     }
