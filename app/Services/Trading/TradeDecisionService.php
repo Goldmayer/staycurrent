@@ -52,6 +52,16 @@ class TradeDecisionService
 
         $lastHa = $haCandles[count($haCandles) - 1];
 
+        // Check for no-trade zone based on small HA candle body
+        $bodySize = abs($lastHa['ha_close'] - $lastHa['ha_open']);
+        if ($bodySize < 0.0005) {
+            return [
+                'action' => 'hold',
+                'reason' => 'no_trade_zone',
+                'ha_dir' => null,
+            ];
+        }
+
         if ($lastHa['ha_close'] > $lastHa['ha_open']) {
             return [
                 'action' => 'open',
