@@ -10,13 +10,25 @@ use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 use Illuminate\Support\Facades\DB;
+use App\Services\Trading\TradeDecisionService;
+
 
 class TradeTickService
 {
+    private readonly TradeDecisionService $decision;
+
     /**
      * Minimum number of candles required to open a trade
      */
     private const MIN_CANDLES = 50;
+
+    /**
+     * Constructor
+     */
+    public function __construct(TradeDecisionService $decision)
+    {
+        $this->decision = $decision;
+    }
 
     /**
      * Process trade tick for all active symbols and timeframes
@@ -58,12 +70,17 @@ class TradeTickService
                 $candleCount = $this->getCandleCount($symbol->code, $timeframe->value);
 
                 if ($currentPrice && $candleCount >= self::MIN_CANDLES) {
-                    // Determine side based on deterministic logic (symbol hash + timeframe)
-                    $side = $this->determineSide($symbol->code, $timeframe->value);
-                    $hash = crc32($symbol->code . '|' . $timeframe->value);
+                    // Use TradeDecisionService to determine action and side
+                    $decision = $this->decision->decideOpen($symbol->code, $timeframe->value);
 
-                    $this->openTrade($symbol->code, $timeframe->value, $side, $currentPrice, $quotePulledAt, $hash, $candleCount);
-                    $tradesOpened++;
+                    // Only open if decision is to open
+                    if ($decision['action'] === 'open') {
+                        $side = $decision['side'];
+                        $hash = crc32($symbol->code . '|' . $timeframe->value);
+
+                        $this->openTrade($symbol->code, $timeframe->value, $side, $currentPrice, $quotePulledAt, $hash, $candleCount, $decision);
+                        $tradesOpened++;
+                    }
                 }
             }
         }
@@ -113,11 +130,10 @@ class TradeTickService
         return ($hash % 2 === 0) ? 'buy' : 'sell';
     }
 
-
     /**
      * Open a new trade
      */
-    private function openTrade(string $symbolCode, string $timeframeCode, string $side, float $entryPrice, ?string $quotePulledAt, int $hash, int $candleCount): void
+    private function openTrade(string $symbolCode, string $timeframeCode, string $side, float $entryPrice, ?string $quotePulledAt, int $hash, int $candleCount, array $decision): void
     {
         Trade::create([
             'symbol_code' => $symbolCode,
@@ -140,6 +156,9 @@ class TradeTickService
                     'deterministic_side_hash' => $hash,
                     'min_candles_required' => self::MIN_CANDLES,
                     'candles_count_at_open' => $candleCount,
+                    'decision_action' => $decision['action'],
+                    'decision_reason' => $decision['reason'],
+                    'decision_ha_dir' => $decision['ha_dir'] ?? null,
                 ],
             ],
         ]);
