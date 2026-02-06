@@ -15,6 +15,11 @@ class TradeCloseService
     private const MIN_CANDLES_FOR_HA = 3;
     private const QUOTE_FRESH_MINUTES = 10;
 
+    public function __construct(
+        private readonly TradeDecisionService $decision,
+    ) {
+    }
+
     public function process(?int $limit = null): array
     {
         $query = Trade::query()
@@ -115,46 +120,14 @@ class TradeCloseService
                 $trade->unrealized_points = $unrealizedPoints;
                 $trade->save();
 
-                // Build HA reversal signal from last CLOSED candles on trade timeframe
-                $candles = Candle::query()
-                    ->where('symbol_code', $trade->symbol_code)
-                    ->where('timeframe_code', $trade->timeframe_code)
-                    ->orderByDesc('open_time_ms')
-                    ->limit(self::MIN_CANDLES_FOR_HA)
-                    ->get();
+                $decision = $this->decision->decideClose((string) $trade->side, $trade->symbol_code, $trade->timeframe_code);
 
-                if ($candles->count() < self::MIN_CANDLES_FOR_HA) {
-                    $skippedNotEnoughCandles++;
-                    $held++;
-                    return;
-                }
-
-                // Chronological order for HA computation
-                $c = $candles->reverse()->values();
-
-                $ha = $this->computeHeikinAshiSeries($c->all());
-
-                // We need last 2 HA candles (based on the last 2 base candles)
-                $prev = $ha[count($ha) - 2];
-                $curr = $ha[count($ha) - 1];
-
-                $prevDir = $this->haDirection($prev['ha_open'], $prev['ha_close']);
-                $currDir = $this->haDirection($curr['ha_open'], $curr['ha_close']);
-
-                // Doji/flat HA is not a reversal signal
-                if ($prevDir === 'flat' || $currDir === 'flat') {
-                    $skippedNoReversal++;
-                    $held++;
-                    return;
-                }
-
-                $isLong = ((string) $trade->side) === 'buy';
-                $reversal = $isLong
-                    ? ($prevDir === 'up' && $currDir === 'down')
-                    : ($prevDir === 'down' && $currDir === 'up');
-
-                if (!$reversal) {
-                    $skippedNoReversal++;
+                if ($decision['action'] !== 'close') {
+                    if ($decision['reason'] === 'not_enough_candles') {
+                        $skippedNotEnoughCandles++;
+                    } else {
+                        $skippedNoReversal++;
+                    }
                     $held++;
                     return;
                 }
@@ -170,11 +143,11 @@ class TradeCloseService
                 $meta = is_array($trade->meta) ? $trade->meta : [];
                 $meta['close'] = [
                     'source' => 'trade:close',
-                    'reason' => 'ha_reversal',
+                    'reason' => $decision['reason'],
                     'quote_pulled_at' => $pulledAt->toDateTimeString(),
                     'timeframe' => (string) $trade->timeframe_code,
-                    'ha_prev_dir' => $prevDir,
-                    'ha_curr_dir' => $currDir,
+                    'ha_prev_dir' => $decision['ha_prev_dir'],
+                    'ha_curr_dir' => $decision['ha_curr_dir'],
                 ];
 
                 $trade->status = TradeStatus::CLOSED;
