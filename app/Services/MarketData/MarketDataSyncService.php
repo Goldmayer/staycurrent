@@ -33,6 +33,7 @@ class MarketDataSyncService
                 [
                     'price' => $price,
                     'source' => 'binance',
+                    'pulled_at' => now(),
                 ]
             );
         } catch (\Exception $e) {
