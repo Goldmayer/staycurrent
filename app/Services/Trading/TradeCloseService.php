@@ -124,9 +124,13 @@ class TradeCloseService
                 $hardExitReason = null;
 
                 // Compute effective risk values (treat null/zero/negative as defaults)
-                $sl = $trade->stop_loss_points && $trade->stop_loss_points > 0 ? $trade->stop_loss_points : 20.0;
-                $tp = $trade->take_profit_points && $trade->take_profit_points > 0 ? $trade->take_profit_points : 60.0;
-                $maxHold = $trade->max_hold_minutes && $trade->max_hold_minutes > 0 ? $trade->max_hold_minutes : 120;
+                $slRaw = (float) ($trade->stop_loss_points ?? 0);
+                $tpRaw = (float) ($trade->take_profit_points ?? 0);
+                $maxHoldRaw = (int) ($trade->max_hold_minutes ?? 0);
+
+                $sl = $slRaw > 0 ? $slRaw : 20.0;
+                $tp = $tpRaw > 0 ? $tpRaw : 60.0;
+                $maxHold = $maxHoldRaw > 0 ? $maxHoldRaw : 120;
 
                 // 1) Stop Loss
                 if ($unrealizedPoints <= -$sl) {

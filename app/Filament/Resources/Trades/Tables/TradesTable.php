@@ -1,99 +1,149 @@
 <?php
 
-namespace App\Filament\Resources\Trades\Tables;
+namespace App\Livewire\Dashboard;
 
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\DeleteBulkAction;
-use Filament\Actions\EditAction;
+use App\Models\Trade;
+use Filament\Actions\Concerns\InteractsWithActions;
+use Filament\Actions\Contracts\HasActions;
+use Filament\Schemas\Concerns\InteractsWithSchemas;
+use Filament\Schemas\Contracts\HasSchemas;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Concerns\InteractsWithTable;
+use Filament\Tables\Contracts\HasTable;
 use Filament\Tables\Table;
-use App\Enums\TradeStatus;
+use Illuminate\Contracts\View\View;
+use Livewire\Component;
 
-class TradesTable
+class TradesTable extends Component implements HasActions, HasSchemas, HasTable
 {
-    public static function configure(Table $table): Table
+    use InteractsWithActions;
+    use InteractsWithSchemas;
+    use InteractsWithTable;
+
+    protected string $paginationTheme = 'tailwind';
+
+    public function table(Table $table): Table
     {
         return $table
+            ->query(Trade::query()->latest('id'))
+            ->paginationPageOptions([10, 25, 50])
+            ->defaultPaginationPageOption(10)
             ->columns([
-                \Filament\Tables\Columns\TextColumn::make('id')
-                    ->label('ID')
-                    ->searchable()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('symbol_code')
-                    ->label('Symbol Code')
-                    ->searchable()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('timeframe_code')
-                    ->label('Timeframe Code')
-                    ->searchable()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('side')
-                    ->label('Side')
-                    ->badge()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('status')
-                    ->label('Status')
-                    ->badge()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('opened_at')
-                    ->label('Opened At')
-                    ->dateTime()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('closed_at')
-                    ->label('Closed At')
-                    ->dateTime()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('entry_price')
-                    ->label('Entry Price')
-                    ->numeric()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('exit_price')
-                    ->label('Exit Price')
-                    ->numeric()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('realized_points')
-                    ->label('Realized Points')
-                    ->numeric()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('unrealized_points')
-                    ->label('Unrealized Points')
-                    ->numeric()
-                    ->sortable(),
-                \Filament\Tables\Columns\TextColumn::make('updated_at')
-                    ->label('Updated At')
-                    ->dateTime()
-                    ->sortable(),
-            ])
-            ->filters([
-                \Filament\Tables\Filters\SelectFilter::make('status')
-                    ->label('Status')
-                    ->options(TradeStatus::options()),
-                \Filament\Tables\Filters\SelectFilter::make('side')
-                    ->label('Side')
-                    ->options(['buy' => 'buy', 'sell' => 'sell']),
-                \Filament\Tables\Filters\SelectFilter::make('symbol_code')
-                    ->label('Symbol Code')
-                    ->options(\App\Models\Trade::query()
-                        ->select('symbol_code')
-                        ->distinct()
-                        ->orderBy('symbol_code')
-                        ->pluck('symbol_code', 'symbol_code')
-                        ->toArray()),
-                \Filament\Tables\Filters\SelectFilter::make('timeframe_code')
-                    ->label('Timeframe Code')
-                    ->options(\App\Models\Trade::query()
-                        ->select('timeframe_code')
-                        ->distinct()
-                        ->orderBy('timeframe_code')
-                        ->pluck('timeframe_code', 'timeframe_code')
-                        ->toArray()),
-            ])
-            ->recordActions([
-                EditAction::make(),
-            ])
-            ->toolbarActions([
-                BulkActionGroup::make([
-                    DeleteBulkAction::make(),
-                ]),
+                TextColumn::make('id')
+                          ->label('ID')
+                          ->sortable(),
+
+                TextColumn::make('symbol_code')
+                          ->label('Symbol')
+                          ->searchable()
+                          ->sortable(),
+
+                TextColumn::make('timeframe_code')
+                          ->label('Timeframe')
+                          ->sortable(),
+
+                TextColumn::make('side')
+                          ->label('Side')
+                          ->badge()
+                          ->formatStateUsing(fn (?string $state) => strtoupper((string) $state))
+                          ->color(fn (?string $state) => $state === 'buy' ? 'success' : 'danger')
+                          ->sortable(),
+
+                TextColumn::make('status')
+                          ->label('Status')
+                          ->badge()
+                          ->formatStateUsing(function ($state): string {
+                              $value = $state instanceof \BackedEnum ? $state->value : (string) $state;
+                              return ucfirst($value);
+                          })
+                          ->color(function ($state): string {
+                              $value = $state instanceof \BackedEnum ? $state->value : (string) $state;
+                              return $value === 'open' ? 'info' : 'gray';
+                          })
+                          ->sortable(),
+
+                TextColumn::make('opened_at')
+                          ->label('Opened At')
+                          ->dateTime('Y-m-d H:i:s')
+                          ->sortable(),
+
+                TextColumn::make('closed_at')
+                          ->label('Closed At')
+                          ->dateTime('Y-m-d H:i:s')
+                          ->placeholder('—')
+                          ->sortable(),
+
+                TextColumn::make('entry_price')
+                          ->label('Entry Price')
+                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
+                          ->sortable(),
+
+                TextColumn::make('exit_price')
+                          ->label('Exit Price')
+                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
+                          ->sortable(),
+
+                TextColumn::make('unrealized_points')
+                          ->label('Unrealized')
+                          ->formatStateUsing(function ($state, Trade $record): string {
+                              if (!$record->isOpen()) {
+                                  return '—';
+                              }
+                              $v = (float) ($state ?? 0);
+                              return ($v > 0 ? '+' : '') . number_format($v, 2);
+                          })
+                          ->color(function ($state, Trade $record): string {
+                              if (!$record->isOpen()) {
+                                  return 'gray';
+                              }
+                              $v = (float) ($state ?? 0);
+                              if ($v > 0) {
+                                  return 'success';
+                              }
+                              if ($v < 0) {
+                                  return 'danger';
+                              }
+                              return 'gray';
+                          })
+                          ->sortable(),
+
+                TextColumn::make('realized_points')
+                          ->label('P&L Points')
+                          ->formatStateUsing(function ($state): string {
+                              $v = (float) ($state ?? 0);
+                              return ($v > 0 ? '+' : '') . number_format($v, 2);
+                          })
+                          ->color(function ($state): string {
+                              $v = (float) ($state ?? 0);
+                              if ($v > 0) {
+                                  return 'success';
+                              }
+                              if ($v < 0) {
+                                  return 'danger';
+                              }
+                              return 'gray';
+                          })
+                          ->sortable(),
+
+                TextColumn::make('stop_loss_points')
+                          ->label('SL (pts)')
+                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 2))
+                          ->sortable(),
+
+                TextColumn::make('take_profit_points')
+                          ->label('TP (pts)')
+                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 2))
+                          ->sortable(),
+
+                TextColumn::make('max_hold_minutes')
+                          ->label('Max hold (min)')
+                          ->formatStateUsing(fn ($state) => $state === null ? '—' : (string) (int) $state)
+                          ->sortable(),
             ]);
+    }
+
+    public function render(): View
+    {
+        return view('livewire.dashboard.trades-table');
     }
 }

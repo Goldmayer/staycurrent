@@ -1,5 +1,16 @@
 @import 'tailwindcss';
 @import '../../vendor/livewire/flux/dist/flux.css';
+/* Filament base */
+@import '../../vendor/filament/support/resources/css/index.css';
+
+/* Actions / Schemas (часто нужно для модалок/кнопок/экшенов) */
+@import '../../vendor/filament/actions/resources/css/index.css';
+@import '../../vendor/filament/schemas/resources/css/index.css';
+
+/* Tables */
+@import '../../vendor/filament/tables/resources/css/index.css';
+
+
 
 @source '../views';
 @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
