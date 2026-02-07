@@ -120,6 +120,64 @@ class TradeCloseService
                 $trade->unrealized_points = $unrealizedPoints;
                 $trade->save();
 
+                // Check hard exits (Stop Loss, Take Profit, Time Stop)
+                $hardExitReason = null;
+
+                // Compute effective risk values (treat null/zero/negative as defaults)
+                $sl = $trade->stop_loss_points && $trade->stop_loss_points > 0 ? $trade->stop_loss_points : 20.0;
+                $tp = $trade->take_profit_points && $trade->take_profit_points > 0 ? $trade->take_profit_points : 60.0;
+                $maxHold = $trade->max_hold_minutes && $trade->max_hold_minutes > 0 ? $trade->max_hold_minutes : 120;
+
+                // 1) Stop Loss
+                if ($unrealizedPoints <= -$sl) {
+                    $hardExitReason = 'stop_loss_hit';
+                }
+                // 2) Take Profit
+                elseif ($unrealizedPoints >= $tp) {
+                    $hardExitReason = 'take_profit_hit';
+                }
+                // 3) Time Stop
+                elseif ($trade->opened_at && now()->diffInMinutes($trade->opened_at) >= $maxHold) {
+                    $hardExitReason = 'time_stop';
+                }
+
+                if ($hardExitReason) {
+                    // Close trade by hard exit
+                    $realizedPoints = $this->pointsFromPrices(
+                        entryPrice: (float) $trade->entry_price,
+                        exitPrice: $priceNow,
+                        pointSize: $pointSize,
+                        side: (string) $trade->side
+                    );
+
+                    $meta = is_array($trade->meta) ? $trade->meta : [];
+                    $meta['close'] = [
+                        'source' => 'trade:close',
+                        'reason' => $hardExitReason,
+                        'quote_pulled_at' => $pulledAt->toDateTimeString(),
+                        'timeframe' => (string) $trade->timeframe_code,
+                        'unrealized_points_at_close' => $unrealizedPoints,
+                        'hold_minutes' => $trade->opened_at ? now()->diffInMinutes($trade->opened_at) : null,
+                        'risk' => [
+                            'stop_loss_points' => $sl,
+                            'take_profit_points' => $tp,
+                            'max_hold_minutes' => $maxHold,
+                        ],
+                    ];
+
+                    $trade->status = TradeStatus::CLOSED;
+                    $trade->closed_at = now();
+                    $trade->exit_price = $priceNow;
+                    $trade->realized_points = $realizedPoints;
+                    $trade->unrealized_points = 0;
+                    $trade->meta = $meta;
+                    $trade->save();
+
+                    $closed++;
+                    return;
+                }
+
+                // Continue with HA reversal logic if no hard exit
                 $decision = $this->decision->decideClose((string) $trade->side, $trade->symbol_code, $trade->timeframe_code);
 
                 if ($decision['action'] !== 'close') {

@@ -19,6 +19,9 @@ class Trade extends Model
         'realized_points',
         'unrealized_points',
         'meta',
+        'stop_loss_points',
+        'take_profit_points',
+        'max_hold_minutes',
     ];
 
     protected $casts = [
@@ -26,6 +29,9 @@ class Trade extends Model
         'closed_at' => 'datetime',
         'meta' => 'array',
         'status' => \App\Enums\TradeStatus::class,
+        'stop_loss_points' => 'decimal:2',
+        'take_profit_points' => 'decimal:2',
+        'max_hold_minutes' => 'integer',
     ];
 
     public function isLong(): bool

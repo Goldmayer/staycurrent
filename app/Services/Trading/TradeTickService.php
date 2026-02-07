@@ -144,6 +144,9 @@ class TradeTickService
             'entry_price' => $entryPrice,
             'realized_points' => 0,
             'unrealized_points' => 0,
+            'stop_loss_points' => 20,
+            'take_profit_points' => 60,
+            'max_hold_minutes' => 120,
             'meta' => [
                 'source' => 'trade:tick',
                 'reason' => 'placeholder_signal',
@@ -159,6 +162,11 @@ class TradeTickService
                     'decision_action' => $decision['action'],
                     'decision_reason' => $decision['reason'],
                     'decision_ha_dir' => $decision['ha_dir'] ?? null,
+                ],
+                'risk' => [
+                    'stop_loss_points' => 20,
+                    'take_profit_points' => 60,
+                    'max_hold_minutes' => 120,
                 ],
             ],
         ]);
