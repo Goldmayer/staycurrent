@@ -3,7 +3,6 @@
 namespace App\Services\MarketData;
 
 use App\Enums\TimeframeCode;
-use App\Models\Candle;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use Illuminate\Support\Facades\DB;
@@ -28,23 +27,35 @@ class MarketDataSyncService
         try {
             $price = $this->client->lastPrice($symbolCode);
 
+            if ($price === null || $price === '' || !is_numeric($price)) {
+                throw new \RuntimeException("Binance lastPrice returned invalid value for {$symbolCode}");
+            }
+
             SymbolQuote::updateOrCreate(
                 ['symbol_code' => $symbolCode],
                 [
                     'price' => $price,
                     'source' => 'binance',
                     'pulled_at' => now(),
+                    'updated_at' => now(),
                 ]
             );
         } catch (\Exception $e) {
-            // Log error and continue
+            SymbolQuote::query()
+                       ->where('symbol_code', $symbolCode)
+                       ->update([
+                           'source' => 'binance_error',
+                           'pulled_at' => now(),
+                           'updated_at' => now(),
+                       ]);
+
             report($e);
         }
     }
 
     public function syncSymbolCandles(string $symbolCode, int $limit = 200): void
     {
-        $symbol = Symbol::where('code', $symbolCode)->first();
+        $symbol = Symbol::query()->where('code', $symbolCode)->first();
 
         if (!$symbol) {
             return;
@@ -60,7 +71,6 @@ class MarketDataSyncService
 
                 $this->upsertCandles($symbolCode, $timeframe->value, $klines);
             } catch (\Exception $e) {
-                // Log error and continue to next timeframe
                 report($e);
             }
         }
@@ -68,6 +78,7 @@ class MarketDataSyncService
 
     private function upsertCandles(string $symbolCode, string $timeframeCode, array $klines): void
     {
+        $now = now();
         $candles = [];
 
         foreach ($klines as $kline) {
@@ -81,8 +92,8 @@ class MarketDataSyncService
                 'close' => $kline['close'],
                 'volume' => $kline['volume'],
                 'close_time_ms' => $kline['close_time_ms'],
-                'created_at' => now(),
-                'updated_at' => now(),
+                'created_at' => $now,
+                'updated_at' => $now,
             ];
         }
 

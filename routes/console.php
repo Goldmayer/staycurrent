@@ -1,18 +1,20 @@
 <?php
 
-use Illuminate\Foundation\Inspiring;
-use Illuminate\Support\Facades\Artisan;
-
-Artisan::command('inspire', function () {
-    $this->comment(Inspiring::quote());
-})->purpose('Display an inspiring quote');
-
-// Register custom commands
-//require __DIR__.'/../app/Console/Commands/TradeTick.php';
-
 use Illuminate\Support\Facades\Schedule;
 
-Schedule::command('market:sync')->everyFiveMinutes();
-Schedule::command('trade:tick')->everyFiveMinutes();
-Schedule::command('trade:close')->everyFiveMinutes();
+Schedule::command('market:sync')
+        ->everyMinute()
+        ->appendOutputTo(storage_path('logs/schedule-market-sync.log'));
+
+Schedule::command('trade:tick')
+        ->everyMinute()
+        ->appendOutputTo(storage_path('logs/schedule-trade-tick.log'));
+
+Schedule::command('trade:close')
+        ->everyMinute()
+        ->appendOutputTo(storage_path('logs/schedule-trade-close.log'));
+
+Schedule::command('trading:rebuild-monitors')
+        ->everyMinute()
+        ->appendOutputTo(storage_path('logs/schedule-trade-monitors.log'));
 

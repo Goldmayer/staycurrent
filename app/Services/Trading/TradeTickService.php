@@ -2,171 +2,189 @@
 
 namespace App\Services\Trading;
 
-use App\Enums\TimeframeCode;
-use App\Enums\TradeSide;
 use App\Enums\TradeStatus;
 use App\Models\Candle;
 use App\Models\Symbol;
+use App\Contracts\StrategySettingsRepository;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
-use Illuminate\Support\Facades\DB;
-use App\Services\Trading\TradeDecisionService;
-
 
 class TradeTickService
 {
-    private readonly TradeDecisionService $decision;
-
-    /**
-     * Minimum number of candles required to open a trade
-     */
     private const MIN_CANDLES = 50;
 
-    /**
-     * Constructor
-     */
-    public function __construct(TradeDecisionService $decision)
-    {
-        $this->decision = $decision;
+    public function __construct(
+        private readonly TradeDecisionService $decision,
+        private readonly StrategySettingsRepository $settings,
+    ) {
     }
 
-    /**
-     * Process trade tick for all active symbols and timeframes
-     */
     public function process(?int $limit = null): array
     {
-        $symbols = Symbol::where('is_active', true);
+        $symbolsQuery = Symbol::query()->where('is_active', true);
 
         if ($limit) {
-            $symbols = $symbols->limit($limit);
+            $symbolsQuery->limit($limit);
         }
 
-        $symbols = $symbols->get();
+        $symbols = $symbolsQuery->get();
+
+        $cfg = $this->settings->get();
 
         $symbolsProcessed = 0;
         $tradesOpened = 0;
         $tradesSkipped = 0;
 
+        $skipped = [
+            'missing_quote' => 0,
+            'decision_hold' => 0,
+            'not_enough_candles' => 0,
+            'existing_open_trade' => 0,
+        ];
+
         foreach ($symbols as $symbol) {
             $symbolsProcessed++;
 
-            foreach ([TimeframeCode::M5] as $timeframe) {
-                // Check if there's already an OPEN trade for this symbol+timeframe
-                $existingTrade = Trade::where([
-                    ['symbol_code', '=', $symbol->code],
-                    ['timeframe_code', '=', $timeframe->value],
-                    ['status', '=', TradeStatus::OPEN->value],
-                ])->first();
+            $quote = $this->getQuote($symbol->code);
+            $currentPrice = $quote?->price;
 
-                if ($existingTrade) {
-                    $tradesSkipped++;
-                    continue;
-                }
-
-                // Check if we have current price and enough candles
-                $quote = $this->getQuote($symbol->code);
-                $currentPrice = $quote?->price;
-                $quotePulledAt = $quote?->pulled_at ? $quote->pulled_at->toDateTimeString() : null;
-                $candleCount = $this->getCandleCount($symbol->code, $timeframe->value);
-
-                if ($currentPrice && $candleCount >= self::MIN_CANDLES) {
-                    // Use TradeDecisionService to determine action and side
-                    $decision = $this->decision->decideOpen($symbol->code, $timeframe->value);
-
-                    // Only open if decision is to open
-                    if ($decision['action'] === 'open') {
-                        $side = $decision['side'];
-                        $hash = crc32($symbol->code . '|' . $timeframe->value);
-
-                        $this->openTrade($symbol->code, $timeframe->value, $side, $currentPrice, $quotePulledAt, $hash, $candleCount, $decision);
-                        $tradesOpened++;
-                    }
-                }
+            if (!$currentPrice) {
+                $tradesSkipped++;
+                $skipped['missing_quote']++;
+                continue;
             }
+
+            $quotePulledAt = $this->formatQuotePulledAt($quote);
+
+            $decision = $this->decision->decideOpen($symbol->code);
+
+            if (($decision['action'] ?? 'hold') !== 'open') {
+                $tradesSkipped++;
+                $skipped['decision_hold']++;
+                continue;
+            }
+
+            $timeframeCode = (string) ($decision['timeframe_code'] ?? '');
+            $side = (string) ($decision['side'] ?? '');
+
+            if ($timeframeCode === '' || $side === '') {
+                $tradesSkipped++;
+                $skipped['decision_hold']++;
+                continue;
+            }
+
+            $candleCount = $this->getCandleCount($symbol->code, $timeframeCode);
+            if ($candleCount < self::MIN_CANDLES) {
+                $tradesSkipped++;
+                $skipped['not_enough_candles']++;
+                continue;
+            }
+
+            $existingTrade = Trade::query()->where([
+                ['symbol_code', '=', $symbol->code],
+                ['timeframe_code', '=', $timeframeCode],
+                ['status', '=', TradeStatus::OPEN->value],
+            ])->first();
+
+            if ($existingTrade) {
+                $tradesSkipped++;
+                $skipped['existing_open_trade']++;
+                continue;
+            }
+
+            $hash = crc32($symbol->code . '|' . $timeframeCode . '|' . $side);
+
+            $this->openTrade(
+                symbolCode: $symbol->code,
+                timeframeCode: $timeframeCode,
+                side: $side,
+                entryPrice: (float) $currentPrice,
+                quotePulledAt: $quotePulledAt,
+                hash: $hash,
+                candleCount: $candleCount,
+                decision: $decision
+            );
+
+            $tradesOpened++;
         }
 
         return [
             'symbols_processed' => $symbolsProcessed,
             'trades_opened' => $tradesOpened,
             'trades_skipped' => $tradesSkipped,
+            'skipped' => $skipped,
         ];
     }
 
-    /**
-     * Get current price for a symbol
-     */
-    private function getCurrentPrice(string $symbolCode): ?float
-    {
-        $quote = SymbolQuote::where('symbol_code', $symbolCode)->first();
-        return $quote ? $quote->price : null;
-    }
-
-    /**
-     * Get quote record for a symbol
-     */
     private function getQuote(string $symbolCode): ?SymbolQuote
     {
-        return SymbolQuote::where('symbol_code', $symbolCode)->first();
+        return SymbolQuote::query()->where('symbol_code', $symbolCode)->first();
     }
 
-    /**
-     * Get candle count for a symbol and timeframe
-     */
     private function getCandleCount(string $symbolCode, string $timeframeCode): int
     {
-        return Candle::where([
-            ['symbol_code', '=', $symbolCode],
-            ['timeframe_code', '=', $timeframeCode],
-        ])->count();
+        return Candle::query()
+                     ->where('symbol_code', $symbolCode)
+                     ->where('timeframe_code', $timeframeCode)
+                     ->count();
     }
 
-    /**
-     * Determine trade side using deterministic logic
-     * Alternates based on symbol hash and timeframe to ensure repeatability
-     */
-    private function determineSide(string $symbolCode, string $timeframeCode): string
+    private function formatQuotePulledAt(?SymbolQuote $quote): ?string
     {
-        $hash = crc32($symbolCode . '|' . $timeframeCode);
-        return ($hash % 2 === 0) ? 'buy' : 'sell';
+        if (!$quote) {
+            return null;
+        }
+
+        $val = $quote->pulled_at ?? $quote->updated_at ?? null;
+        if ($val === null) {
+            return null;
+        }
+
+        if ($val instanceof \DateTimeInterface) {
+            return $val->format('Y-m-d H:i:s');
+        }
+
+        return (string) $val;
     }
 
-    /**
-     * Open a new trade
-     */
-    private function openTrade(string $symbolCode, string $timeframeCode, string $side, float $entryPrice, ?string $quotePulledAt, int $hash, int $candleCount, array $decision): void
-    {
+    private function openTrade(
+        string $symbolCode,
+        string $timeframeCode,
+        string $side,
+        float $entryPrice,
+        ?string $quotePulledAt,
+        int $hash,
+        int $candleCount,
+        array $decision
+    ): void {
+        $risk = $this->settings->get()['risk'];
+
         Trade::create([
             'symbol_code' => $symbolCode,
             'timeframe_code' => $timeframeCode,
             'side' => $side,
-            'status' => TradeStatus::OPEN,
-            'opened_at' => now(),
+            'status' => TradeStatus::OPEN->value,
             'entry_price' => $entryPrice,
-            'realized_points' => 0,
-            'unrealized_points' => 0,
-            'stop_loss_points' => 20,
-            'take_profit_points' => 60,
-            'max_hold_minutes' => 120,
+            'opened_at' => now(),
+            'stop_loss_points' => $risk['stop_loss_points'],
+            'take_profit_points' => $risk['take_profit_points'],
+            'max_hold_minutes' => $risk['max_hold_minutes'],
             'meta' => [
                 'source' => 'trade:tick',
-                'reason' => 'placeholder_signal',
-                'timeframe' => $timeframeCode,
                 'open' => [
                     'source' => 'trade:tick',
-                    'reason' => 'placeholder_signal',
+                    'reason' => (string) ($decision['reason'] ?? 'strategy_entry'),
                     'timeframe' => $timeframeCode,
                     'quote_pulled_at' => $quotePulledAt,
-                    'deterministic_side_hash' => $hash,
+                    'hash' => $hash,
                     'min_candles_required' => self::MIN_CANDLES,
                     'candles_count_at_open' => $candleCount,
-                    'decision_action' => $decision['action'],
-                    'decision_reason' => $decision['reason'],
-                    'decision_ha_dir' => $decision['ha_dir'] ?? null,
+                    'decision' => $decision,
                 ],
                 'risk' => [
-                    'stop_loss_points' => 20,
-                    'take_profit_points' => 60,
-                    'max_hold_minutes' => 120,
+                    'stop_loss_points' => $risk['stop_loss_points'],
+                    'take_profit_points' => $risk['take_profit_points'],
+                    'max_hold_minutes' => $risk['max_hold_minutes'],
                 ],
             ],
         ]);

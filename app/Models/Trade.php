@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\TradeStatus;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Trade extends Model
 {
@@ -33,6 +34,11 @@ class Trade extends Model
         'take_profit_points' => 'decimal:2',
         'max_hold_minutes' => 'integer',
     ];
+
+    public function symbol(): BelongsTo
+    {
+        return $this->belongsTo(Symbol::class, 'symbol_code', 'code');
+    }
 
     public function isLong(): bool
     {
