@@ -17,35 +17,23 @@ use Illuminate\Validation\Rules\Password;
 
 class AppServiceProvider extends ServiceProvider
 {
-    /**
-     * Register any application services.
-     */
     public function register(): void
     {
         $this->app->bind(StrategySettingsRepository::class, ConfigStrategySettingsRepository::class);
-        $this->app->bind(
-            MarketDataProvider::class,
-            TwelveDataMarketDataProvider::class
-        );
 
-        // Bind FX quotes providers
+        $this->app->bind(MarketDataProvider::class, TwelveDataMarketDataProvider::class);
+
         $this->app->singleton(FxQuotesProviderPool::class, function ($app) {
-            $providers = [
+            return new FxQuotesProviderPool([
                 $app->make(TwelveDataFxQuotesProvider::class),
-            ];
-
-            return new FxQuotesProviderPool($providers);
+            ]);
         });
 
-        // Bind FxQuotesProvider to FxQuotesProviderPool as singleton
         $this->app->singleton(FxQuotesProvider::class, function ($app) {
             return $app->make(FxQuotesProviderPool::class);
         });
     }
 
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
         $this->configureDefaults();
@@ -61,11 +49,11 @@ class AppServiceProvider extends ServiceProvider
 
         Password::defaults(fn (): ?Password => app()->isProduction()
             ? Password::min(12)
-                ->mixedCase()
-                ->letters()
-                ->numbers()
-                ->symbols()
-                ->uncompromised()
+                      ->mixedCase()
+                      ->letters()
+                      ->numbers()
+                      ->symbols()
+                      ->uncompromised()
             : null
         );
     }

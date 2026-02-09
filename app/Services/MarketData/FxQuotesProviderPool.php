@@ -24,14 +24,12 @@ class FxQuotesProviderPool implements FxQuotesProvider
 
     public function batchQuotes(array $fxSymbolCodes): array
     {
-        // Filter to only 6-letter uppercase FX codes
         $validCodes = array_filter($fxSymbolCodes, fn ($code) => preg_match('/^[A-Z]{6}$/', $code));
 
         if (empty($validCodes)) {
             return [];
         }
 
-        // Only one provider now (TwelveDataFxQuotesProvider)
         $provider = $this->providers[0];
         $source = $provider->source();
         $cooldownKey = "fx_quotes_cooldown:{$source}";
@@ -41,8 +39,7 @@ class FxQuotesProviderPool implements FxQuotesProvider
         }
 
         try {
-            $quotes = $provider->batchQuotes($validCodes);
-            return $quotes;
+            return $provider->batchQuotes($validCodes);
         } catch (Throwable $e) {
             if ($e instanceof RequestException && $e->response?->status() === 429) {
                 Cache::put($cooldownKey, true, now()->addMinutes(self::COOLDOWN_MINUTES));

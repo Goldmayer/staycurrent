@@ -65,7 +65,8 @@ class MarketDataSyncService
             return;
         }
 
-        $timeframes = $this->timeframesToSyncNow();
+        // Always sync all timeframes for backfill, regardless of current time
+        $timeframes = ['5m', '15m', '30m', '1h', '4h', '1d'];
 
         foreach ($timeframes as $timeframeCode) {
             try {
@@ -153,8 +154,31 @@ class MarketDataSyncService
 
         DB::table('candles')->upsert(
             $candles,
-            ['symbol_code', 'timeframe_code', 'open_time_ms']
+            ['symbol_code', 'timeframe_code', 'open_time_ms'],
+            ['open', 'high', 'low', 'close', 'volume', 'close_time_ms', 'updated_at']
         );
+
+        // Keep only the most recent 200 candles per symbol and timeframe
+        $count = DB::table('candles')
+            ->where('symbol_code', $symbolCode)
+            ->where('timeframe_code', $timeframeCode)
+            ->count();
+
+        if ($count > 200) {
+            $cutoffTime = DB::table('candles')
+                ->where('symbol_code', $symbolCode)
+                ->where('timeframe_code', $timeframeCode)
+                ->orderByDesc('open_time_ms')
+                ->offset(199)
+                ->limit(1)
+                ->value('open_time_ms');
+
+            DB::table('candles')
+                ->where('symbol_code', $symbolCode)
+                ->where('timeframe_code', $timeframeCode)
+                ->where('open_time_ms', '<', $cutoffTime)
+                ->delete();
+        }
     }
 
     /**

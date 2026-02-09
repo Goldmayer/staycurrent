@@ -9,6 +9,7 @@ class TradePnlService
 {
     public function pointsFromPrices(string $side, float $entryPrice, float $currentPrice): float
     {
+        $side = strtolower(trim($side));
         $entryPrice = (float) $entryPrice;
         $currentPrice = (float) $currentPrice;
 
@@ -28,8 +29,8 @@ class TradePnlService
         if ($trade->isOpen()) {
             $trade->unrealized_points = $this->pointsFromPrices(
                 $trade->side,
-                $trade->entry_price,
-                $currentPrice
+                (float) $trade->entry_price,
+                (float) $currentPrice
             );
             $trade->save();
         }
@@ -40,14 +41,14 @@ class TradePnlService
     public function closeTrade(Trade $trade, float $exitPrice): Trade
     {
         if ($trade->isOpen()) {
-            $trade->exit_price = $exitPrice;
+            $trade->exit_price = (float) $exitPrice;
             $trade->status = TradeStatus::CLOSED;
             $trade->realized_points = $this->pointsFromPrices(
                 $trade->side,
-                $trade->entry_price,
-                $exitPrice
+                (float) $trade->entry_price,
+                (float) $exitPrice
             );
-            $trade->unrealized_points = 0;
+            $trade->unrealized_points = 0.0;
             $trade->save();
         }
 

@@ -54,11 +54,18 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
         }
 
         $symbol = $this->mapSymbolCode($symbolCode);
-        $interval = $this->mapTimeframeCode($timeframeCode);
 
-        if ($interval === null) {
-            return [];
-        }
+        // Implement proper interval mapping for TwelveData API
+        $intervalMap = [
+            '5m'  => '5min',
+            '15m' => '15min',
+            '30m' => '30min',
+            '1h'  => '1h',
+            '4h'  => '4h',
+            '1d'  => '1day',
+        ];
+
+        $interval = $intervalMap[$timeframeCode] ?? $timeframeCode;
 
         $data = $this->requestJson('/time_series', [
             'symbol' => $symbol,

@@ -3,13 +3,17 @@
 namespace App\Services\MarketData;
 
 use App\Contracts\FxQuotesProvider;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
 class TwelveDataFxQuotesProvider implements FxQuotesProvider
 {
-    private array $cache = [];
+    private const BASE_URL = 'https://api.twelvedata.com';
+    private const CACHE_KEY_PREFIX = 'fx_quotes:twelvedata:';
+    private const CACHE_SECONDS = 20;
 
     public function source(): string
     {
@@ -18,73 +22,47 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
 
     public function batchQuotes(array $fxSymbolCodes): array
     {
-        // Filter to only 6-letter uppercase FX codes
-        $validCodes = array_filter($fxSymbolCodes, fn($code) => preg_match('/^[A-Z]{6}$/', $code));
+        $codes = array_values(array_unique(array_filter(
+            $fxSymbolCodes,
+            fn ($c) => is_string($c) && preg_match('/^[A-Z]{6}$/', $c)
+        )));
 
-        if (empty($validCodes)) {
+        if (empty($codes)) {
             return [];
         }
 
-        // Check cache first for all requested symbols
-        $missingCodes = [];
-        $result = [];
-
-        foreach ($validCodes as $symbolCode) {
-            if (isset($this->cache[$symbolCode])) {
-                $result[$symbolCode] = $this->cache[$symbolCode];
-            } else {
-                $missingCodes[] = $symbolCode;
-            }
+        $cacheKey = self::CACHE_KEY_PREFIX . md5(implode(',', $codes));
+        $cached = Cache::get($cacheKey);
+        if (is_array($cached)) {
+            return $this->filterToRequested($cached, $codes);
         }
 
-        // If all symbols are cached, return early
-        if (empty($missingCodes)) {
-            return $result;
+        $apiKey = config('services.twelvedata.key') ?: env('TWELVEDATA_API_KEY');
+        if (!is_string($apiKey) || $apiKey === '') {
+            return [];
         }
 
-        // Convert internal codes to TwelveData format (EURUSD -> EUR/USD)
-        $symbols = array_map(fn($code) => substr($code, 0, 3) . '/' . substr($code, 3, 3), $missingCodes);
+        $symbols = implode(',', array_map([$this, 'toTwelveDataSymbol'], $codes));
 
         try {
             $response = Http::retry(2, 200)
-                ->get('https://api.twelvedata.com/price', [
-                    'symbol' => implode(',', $symbols),
-                    'apikey' => config('services.twelvedata.key'),
-                ])
-                ->throw();
+                            ->timeout(10)
+                            ->acceptJson()
+                            ->get(self::BASE_URL . '/price', [
+                                'symbol' => $symbols,
+                                'apikey' => $apiKey,
+                            ])
+                            ->throw();
 
             $data = $response->json();
 
-            // Handle single symbol response
-            if (isset($data['price'])) {
-                $symbol = $symbols[0];
-                $price = (float)$data['price'];
-                $internalCode = str_replace('/', '', $symbol);
+            $mapped = $this->mapResponseToInternalCodes($data);
 
-                if ($price > 0) {
-                    $this->cache[$internalCode] = $price;
-                    $result[$internalCode] = $price;
-                }
-            }
-            // Handle multiple symbols response
-            elseif (is_array($data)) {
-                foreach ($symbols as $symbol) {
-                    $internalCode = str_replace('/', '', $symbol);
+            Cache::put($cacheKey, $mapped, self::CACHE_SECONDS);
 
-                    if (isset($data[$symbol]['price'])) {
-                        $price = (float)$data[$symbol]['price'];
-                        if ($price > 0) {
-                            $this->cache[$internalCode] = $price;
-                            $result[$internalCode] = $price;
-                        }
-                    }
-                }
-            }
-
-            return $result;
+            return $this->filterToRequested($mapped, $codes);
         } catch (Throwable $e) {
-            if ($e instanceof \Illuminate\Http\Client\RequestException && $e->response?->status() === 429) {
-                // Rate limited - return empty array, cache will be cleared on next run
+            if ($this->isRateLimited($e, $e instanceof RequestException ? $e->response : null)) {
                 return [];
             }
 
@@ -95,10 +73,71 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
 
     public function isRateLimited(Throwable $e, ?Response $response = null): bool
     {
-        if ($response && $response->status() === 429) {
+        $status = $response?->status();
+
+        if ($e instanceof RequestException && $status === 429) {
             return true;
         }
 
-        return false;
+        return $status === 429;
+    }
+
+    private function toTwelveDataSymbol(string $internalCode): string
+    {
+        $base = substr($internalCode, 0, 3);
+        $quote = substr($internalCode, 3, 3);
+
+        return $base . '/' . $quote;
+    }
+
+    private function mapResponseToInternalCodes(mixed $data): array
+    {
+        if (!is_array($data)) {
+            return [];
+        }
+
+        if (array_key_exists('code', $data) && array_key_exists('message', $data)) {
+            return [];
+        }
+
+        $out = [];
+
+        if (array_key_exists('price', $data) && (is_string($data['price']) || is_numeric($data['price']))) {
+            if (isset($data['symbol']) && is_string($data['symbol'])) {
+                $internal = str_replace('/', '', strtoupper($data['symbol']));
+                $out[$internal] = (float) $data['price'];
+            }
+
+            return $out;
+        }
+
+        foreach ($data as $symbol => $payload) {
+            if (!is_string($symbol) || !is_array($payload)) {
+                continue;
+            }
+
+            $price = $payload['price'] ?? null;
+            if (!is_string($price) && !is_numeric($price)) {
+                continue;
+            }
+
+            $internal = str_replace('/', '', strtoupper($symbol));
+            $out[$internal] = (float) $price;
+        }
+
+        return $out;
+    }
+
+    private function filterToRequested(array $all, array $requestedCodes): array
+    {
+        $out = [];
+        foreach ($requestedCodes as $code) {
+            if (array_key_exists($code, $all) && is_numeric($all[$code])) {
+                $out[$code] = (float) $all[$code];
+            }
+        }
+
+        return $out;
     }
 }
+

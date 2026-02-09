@@ -1,6 +1,6 @@
 @php
     // твой цикл обновления данных из schedule: everyFiveMinutes()
-    $cycleSeconds = 60;
+    $cycleSeconds = 300;
     // даём клиенту "якорь" времени с сервера, чтобы не зависеть от локальных часов
     $serverUnix = now('UTC')->timestamp;
 @endphp
