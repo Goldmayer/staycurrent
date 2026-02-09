@@ -5,16 +5,11 @@ namespace App\Services\MarketData;
 use App\Contracts\MarketDataProvider;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class TwelveDataMarketDataProvider implements MarketDataProvider
 {
-    protected string $apiKey;
     protected string $baseUrl = 'https://api.twelvedata.com';
-
-    public function __construct()
-    {
-        $this->apiKey = config('services.twelvedata.key');
-    }
 
     public function source(): string
     {
@@ -23,16 +18,10 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
 
     public function lastPrice(string $symbolCode): ?float
     {
-        // Strict API key guard
-        if (empty($this->apiKey)) {
-            return null;
-        }
-
         $symbol = $this->mapSymbolCode($symbolCode);
 
         $data = $this->requestJson('/price', [
             'symbol' => $symbol,
-            'apikey' => $this->apiKey,
         ]);
 
         if ($data === null) {
@@ -48,14 +37,8 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
 
     public function candles(string $symbolCode, string $timeframeCode, int $limit = 200): array
     {
-        // Strict API key guard
-        if (empty($this->apiKey)) {
-            return [];
-        }
-
         $symbol = $this->mapSymbolCode($symbolCode);
 
-        // Implement proper interval mapping for TwelveData API
         $intervalMap = [
             '5m'  => '5min',
             '15m' => '15min',
@@ -72,7 +55,6 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
             'interval' => $interval,
             'outputsize' => $limit,
             'format' => 'JSON',
-            'apikey' => $this->apiKey,
         ]);
 
         if ($data === null) {
@@ -87,7 +69,6 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
         $candles = [];
 
         foreach ($data['values'] as $candleData) {
-            // Parse candle timestamps in UTC deterministically
             $timestamp = CarbonImmutable::parse($candleData['datetime'], 'UTC')->getTimestamp() * 1000;
 
             $candles[] = [
@@ -101,7 +82,6 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
             ];
         }
 
-        // Sort by timestamp ascending (oldest first)
         usort($candles, function ($a, $b) {
             return $a['open_time_ms'] <=> $b['open_time_ms'];
         });
@@ -111,7 +91,6 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
 
     protected function mapSymbolCode(string $symbolCode): string
     {
-        // Map EURUSD to EUR/USD format
         if (strlen($symbolCode) === 6) {
             return substr($symbolCode, 0, 3) . '/' . substr($symbolCode, 3, 3);
         }
@@ -144,46 +123,53 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
             '1d' => 24 * 60 * 60 * 1000,
         ];
 
-        return $durations[$timeframeCode] ?? (60 * 60 * 1000); // Default to 1 hour
+        return $durations[$timeframeCode] ?? (60 * 60 * 1000);
     }
 
-    /**
-     * Perform HTTP GET request with rate limit handling for Twelve Data API.
-     *
-     * @param string $path API endpoint path (e.g., '/price', '/time_series')
-     * @param array $query Query parameters
-     * @return array|null JSON response array on success, null on failure
-     */
     private function requestJson(string $path, array $query): ?array
     {
-        $response = Http::get($this->baseUrl . $path, $query);
+        $pool = app(TwelveDataApiKeyPool::class);
 
-        if ($response->failed()) {
+        try {
+            $data = $pool->withFailover(function (string $apiKey) use ($path, $query) {
+                $q = $query;
+                $q['apikey'] = $apiKey;
+
+                $response = Http::timeout(15)
+                                ->acceptJson()
+                                ->get($this->baseUrl . $path, $q);
+
+                if ($response->status() === 429) {
+                    $response->throw();
+                }
+
+                $json = $response->json();
+
+                if (is_array($json)
+                    && ($json['status'] ?? null) === 'error'
+                    && ((int) ($json['code'] ?? 0)) === 429
+                ) {
+                    throw new TwelveDataRateLimitedException('TwelveData rate limited');
+                }
+
+                if ($response->failed()) {
+                    $response->throw();
+                }
+
+                return $json;
+            });
+
+            return is_array($data) ? $data : null;
+        } catch (\RuntimeException $e) {
+            // Only "all keys exhausted" should be handled specially; everything else must be visible.
+            if (str_contains($e->getMessage(), 'TwelveData rate limit')) {
+                Log::error('[TwelveData] candles exhausted -> throwing');
+                throw $e;
+            }
+
+            throw $e;
+        } catch (\Throwable $e) {
             return null;
         }
-
-        $data = $response->json();
-
-        // Check for rate limit error (429)
-        if (isset($data['status']) && $data['status'] === 'error' &&
-            isset($data['code']) && $data['code'] === 429) {
-            // Wait 60 seconds then retry once
-            sleep(60);
-            $response = Http::get($this->baseUrl . $path, $query);
-
-            if ($response->failed()) {
-                return null;
-            }
-
-            $data = $response->json();
-
-            // If still rate limited after retry, return null
-            if (isset($data['status']) && $data['status'] === 'error' &&
-                isset($data['code']) && $data['code'] === 429) {
-                return null;
-            }
-        }
-
-        return $data;
     }
 }

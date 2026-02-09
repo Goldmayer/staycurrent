@@ -113,9 +113,31 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-                TextColumn::make('reason')
-                          ->label('Reason')
-                          ->getStateUsing(fn (Trade $record) => (string) (data_get($record->meta, 'open.reason', '—')))
+
+                TextColumn::make('entry_reason')
+                          ->label('Entry Reason')
+                          ->getStateUsing(function (Trade $record): string {
+                              $decision = data_get($record->meta, 'open.decision');
+
+                              if (! $decision) {
+                                  return 'Strategy entry (details unavailable)';
+                              }
+
+                              $side = data_get($decision, 'side');
+                              $timeframeCode = data_get($decision, 'timeframe_code');
+                              $currentTf = data_get($decision, 'debug.current_tf');
+                              $voteTotal = data_get($decision, 'debug.vote_total');
+                              $flatOk = data_get($decision, "debug.flat.{$timeframeCode}.ok");
+
+                              if (! $side || ! $timeframeCode || ! $currentTf || $voteTotal === null) {
+                                  return 'Strategy entry (details unavailable)';
+                              }
+
+                              $sideUpper = strtoupper((string) $side);
+                              $flatStatus = $flatOk === true ? 'not flat' : "market was flat on {$timeframeCode}";
+
+                              return "{$sideUpper} entry on {$timeframeCode}, confirmed by {$currentTf}. Market index {$voteTotal}. {$timeframeCode} {$flatStatus}.";
+                          })
                           ->wrap(),
 
                 TextColumn::make('opened_at')
@@ -126,7 +148,7 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                 TextColumn::make('entry_price')
                           ->label('Entry')
-                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
+                    ->formatStateUsing(fn ($state) => number_format((float) $state, 4, '.', ''))
                           ->sortable(),
 
                 TextColumn::make('unrealized_points')
@@ -230,13 +252,14 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-                TextColumn::make('max_hold_minutes')
-                          ->label('Max hold')
-                          ->formatStateUsing(fn ($state) => $state === null ? '—' : (string) (int) $state)
-                          ->sortable(),
 
                 TextColumn::make('expectation')
                           ->label('Expectation')
+                    ->color(fn (?string $state): string => match (true) {
+                        is_string($state) && str_starts_with($state, 'OK:') => 'success',
+                        is_string($state) && str_starts_with($state, 'Exit:') => 'danger',
+                        default => 'gray',
+                    })
                           ->getStateUsing(function (Trade $record): ?string {
                               $entryTf = (string) ($record->timeframe_code ?? '');
                               $lowerTf = match ($entryTf) {

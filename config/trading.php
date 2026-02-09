@@ -102,7 +102,7 @@ return [
              * Maximum hold time in minutes.
              * Default: 120
              */
-            'max_hold_minutes' => 120,
+            'max_hold_minutes' => 12000,
 
             /*
              * Trailing stop settings.

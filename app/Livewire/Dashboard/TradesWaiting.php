@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Dashboard;
 
+use App\Models\Symbol;
 use App\Models\TradeMonitor;
 use App\Services\Trading\TradeDecisionService;
 use Filament\Actions\Concerns\InteractsWithActions;
@@ -41,8 +42,13 @@ class TradesWaiting extends Component implements HasActions, HasForms, HasTable
     {
         $this->debug_total_records = TradeMonitor::count();
 
+        $activeTimeframes = $this->getActiveTimeframes();
+        $activeSymbols = $this->getActiveSymbolCodes();
+
         $query = TradeMonitor::query()
                              ->whereNull('open_trade_id')
+                             ->whereIn('timeframe_code', $activeTimeframes)
+                             ->whereIn('symbol_code', $activeSymbols)
                              ->with('openTrade');
 
         $this->debug_table_records_count = (clone $query)->count();
@@ -55,22 +61,15 @@ class TradesWaiting extends Component implements HasActions, HasForms, HasTable
             ->filters([
                 SelectFilter::make('symbol_code')
                             ->label('Symbol')
-                            ->options(fn () => TradeMonitor::query()
-                                                           ->select('symbol_code')
-                                                           ->distinct()
-                                                           ->orderBy('symbol_code')
-                                                           ->pluck('symbol_code', 'symbol_code')
-                                                           ->all()
+                            ->options(fn () => Symbol::query()
+                                                     ->where('is_active', true)
+                                                     ->orderBy('code')
+                                                     ->pluck('code', 'code')
+                                                     ->all()
                             ),
                 SelectFilter::make('timeframe_code')
                             ->label('TF')
-                            ->options(fn () => TradeMonitor::query()
-                                                           ->select('timeframe_code')
-                                                           ->distinct()
-                                                           ->orderBy('timeframe_code')
-                                                           ->pluck('timeframe_code', 'timeframe_code')
-                                                           ->all()
-                            ),
+                            ->options(fn () => array_combine($activeTimeframes, $activeTimeframes)),
             ])
             ->columns([
                 TextColumn::make('symbol_code')
@@ -83,44 +82,130 @@ class TradesWaiting extends Component implements HasActions, HasForms, HasTable
                           ->searchable()
                           ->sortable(),
 
+                TextColumn::make('tf_dir')
+                          ->label('Dir')
+                          ->badge()
+                          ->getStateUsing(function (TradeMonitor $record): string {
+                              $debug = $this->getMarketDebugForSymbol($record->symbol_code);
+                              $dir = $debug['dirs'][$record->timeframe_code] ?? null;
+
+                              return match ($dir) {
+                                  'up' => 'UP',
+                                  'down' => 'DOWN',
+                                  default => 'FLAT',
+                              };
+                          })
+                          ->color(function (TradeMonitor $record): string {
+                              $debug = $this->getMarketDebugForSymbol($record->symbol_code);
+                              $dir = $debug['dirs'][$record->timeframe_code] ?? null;
+
+                              return match ($dir) {
+                                  'up' => 'success',
+                                  'down' => 'danger',
+                                  default => 'gray',
+                              };
+                          }),
+
+                TextColumn::make('market_index')
+                          ->label('Market')
+                          ->badge()
+                          ->getStateUsing(function (TradeMonitor $record): string {
+                              $debug = $this->getMarketDebugForSymbol($record->symbol_code);
+
+                              $voteTotal = $debug['vote_total'];
+                              $threshold = $debug['threshold'];
+
+                              if ($voteTotal === null || $threshold === null || abs($voteTotal) < $threshold) {
+                                  return 'No edge';
+                              }
+
+                              $direction = $voteTotal > 0 ? 'BUY' : 'SELL';
+
+                              return "Index {$voteTotal} ({$direction})";
+                          })
+                          ->color(function (TradeMonitor $record): string {
+                              $debug = $this->getMarketDebugForSymbol($record->symbol_code);
+
+                              $voteTotal = $debug['vote_total'];
+                              $threshold = $debug['threshold'];
+
+                              if ($voteTotal === null || $threshold === null || abs($voteTotal) < $threshold) {
+                                  return 'gray';
+                              }
+
+                              return $voteTotal > 0 ? 'success' : 'danger';
+                          })
+                          ->wrap(),
+
+                TextColumn::make('tf_map')
+                          ->label('TF map')
+                          ->getStateUsing(function (TradeMonitor $record): string {
+                              $debug = $this->getMarketDebugForSymbol($record->symbol_code);
+                              $dirs = $debug['dirs'] ?? [];
+
+                              $order = $this->getActiveTimeframes();
+                              $parts = [];
+
+                              foreach ($order as $tf) {
+                                  $arrow = match ($dirs[$tf] ?? null) {
+                                      'up' => '↑',
+                                      'down' => '↓',
+                                      default => '→',
+                                  };
+
+                                  $parts[] = "{$tf}{$arrow}";
+                              }
+
+                              return implode(' ', $parts);
+                          })
+                          ->wrap(),
+
                 TextColumn::make('expectation')
                           ->label('Expectation')
                           ->getStateUsing(fn (TradeMonitor $record) => (string) ($record->expectation ?? '—'))
-                          ->wrap(),
-
-                TextColumn::make('market_summary')
-                          ->label('Market')
-                          ->getStateUsing(function (TradeMonitor $record) {
-                              return $this->getMarketSummaryForSymbol($record->symbol_code);
-                          })
-                          ->wrap(),
+                          ->wrap()
+                          ->color(fn (?string $state): string => match (true) {
+                              is_string($state) && str_starts_with($state, 'OK:') => 'success',
+                              is_string($state) && str_starts_with($state, 'Exit:') => 'danger',
+                              default => 'gray',
+                          }),
             ]);
     }
 
-    private function getMarketSummaryForSymbol(string $symbolCode): string
+    private function getActiveTimeframes(): array
     {
-        static $marketCache = [];
+        $timeframes = (array) config('trading.strategy.timeframes', []);
 
-        if (!isset($marketCache[$symbolCode])) {
+        return array_values(array_filter($timeframes, fn ($tf) => is_string($tf) && $tf !== ''));
+    }
+
+    private function getActiveSymbolCodes(): array
+    {
+        return Symbol::query()
+                     ->where('is_active', true)
+                     ->orderBy('code')
+                     ->pluck('code')
+                     ->all();
+    }
+
+    private function getMarketDebugForSymbol(string $symbolCode): array
+    {
+        static $cache = [];
+
+        if (!isset($cache[$symbolCode])) {
             $decisionService = app(TradeDecisionService::class);
             $decision = $decisionService->decideOpen($symbolCode);
 
-            if (isset($decision['debug']['vote_total'], $decision['debug']['threshold'])) {
-                $voteTotal = $decision['debug']['vote_total'];
-                $threshold = $decision['debug']['threshold'];
+            $debug = $decision['debug'] ?? [];
 
-                if (abs($voteTotal) < $threshold) {
-                    $marketCache[$symbolCode] = 'No edge';
-                } else {
-                    $direction = $voteTotal > 0 ? 'BUY' : 'SELL';
-                    $marketCache[$symbolCode] = "Market index: {$voteTotal} ({$direction})";
-                }
-            } else {
-                $marketCache[$symbolCode] = 'No edge';
-            }
+            $cache[$symbolCode] = [
+                'vote_total' => $debug['vote_total'] ?? null,
+                'threshold' => $debug['threshold'] ?? null,
+                'dirs' => (array) ($debug['dirs'] ?? []),
+            ];
         }
 
-        return $marketCache[$symbolCode];
+        return $cache[$symbolCode];
     }
 
     public function render(): View

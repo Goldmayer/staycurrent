@@ -7,6 +7,7 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 class TwelveDataFxQuotesProvider implements FxQuotesProvider
@@ -37,24 +38,27 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
             return $this->filterToRequested($cached, $codes);
         }
 
-        $apiKey = config('services.twelvedata.key') ?: env('TWELVEDATA_API_KEY');
-        if (!is_string($apiKey) || $apiKey === '') {
-            return [];
-        }
-
         $symbols = implode(',', array_map([$this, 'toTwelveDataSymbol'], $codes));
+        $pool = app(TwelveDataApiKeyPool::class);
 
         try {
-            $response = Http::retry(2, 200)
-                            ->timeout(10)
-                            ->acceptJson()
-                            ->get(self::BASE_URL . '/price', [
-                                'symbol' => $symbols,
-                                'apikey' => $apiKey,
-                            ])
-                            ->throw();
+            $data = $pool->withFailover(function (string $apiKey) use ($symbols) {
+                $response = Http::retry(2, 200)
+                                ->timeout(10)
+                                ->acceptJson()
+                                ->get(self::BASE_URL . '/price', [
+                                    'symbol' => $symbols,
+                                    'apikey' => $apiKey,
+                                ]);
 
-            $data = $response->json();
+                if ($response->status() === 429) {
+                    $response->throw();
+                }
+
+                $response->throw();
+
+                return $response->json();
+            });
 
             $mapped = $this->mapResponseToInternalCodes($data);
 
@@ -63,6 +67,7 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
             return $this->filterToRequested($mapped, $codes);
         } catch (Throwable $e) {
             if ($this->isRateLimited($e, $e instanceof RequestException ? $e->response : null)) {
+                Log::warning('[TwelveData] quotes exhausted -> returning empty quotes');
                 return [];
             }
 
@@ -76,6 +81,10 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
         $status = $response?->status();
 
         if ($e instanceof RequestException && $status === 429) {
+            return true;
+        }
+
+        if ($e instanceof \RuntimeException && str_contains($e->getMessage(), 'TwelveData rate limit')) {
             return true;
         }
 
@@ -140,4 +149,3 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
         return $out;
     }
 }
-
