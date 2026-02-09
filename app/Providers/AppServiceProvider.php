@@ -2,7 +2,12 @@
 
 namespace App\Providers;
 
+use App\Contracts\FxQuotesProvider;
+use App\Contracts\MarketDataProvider;
 use App\Contracts\StrategySettingsRepository;
+use App\Services\MarketData\FxQuotesProviderPool;
+use App\Services\MarketData\TwelveDataFxQuotesProvider;
+use App\Services\MarketData\TwelveDataMarketDataProvider;
 use App\Services\Trading\ConfigStrategySettingsRepository;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
@@ -18,6 +23,24 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->bind(StrategySettingsRepository::class, ConfigStrategySettingsRepository::class);
+        $this->app->bind(
+            MarketDataProvider::class,
+            TwelveDataMarketDataProvider::class
+        );
+
+        // Bind FX quotes providers
+        $this->app->singleton(FxQuotesProviderPool::class, function ($app) {
+            $providers = [
+                $app->make(TwelveDataFxQuotesProvider::class),
+            ];
+
+            return new FxQuotesProviderPool($providers);
+        });
+
+        // Bind FxQuotesProvider to FxQuotesProviderPool as singleton
+        $this->app->singleton(FxQuotesProvider::class, function ($app) {
+            return $app->make(FxQuotesProviderPool::class);
+        });
     }
 
     /**

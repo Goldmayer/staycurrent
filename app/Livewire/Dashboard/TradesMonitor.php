@@ -2,8 +2,8 @@
 
 namespace App\Livewire\Dashboard;
 
+use App\Models\Candle;
 use App\Models\Trade;
-use App\Models\TradeMonitor;
 use Filament\Actions\Concerns\InteractsWithActions;
 use Filament\Actions\Contracts\HasActions;
 use Filament\Forms\Concerns\InteractsWithForms;
@@ -39,16 +39,13 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
     public function table(Table $table): Table
     {
-        $this->debug_total_records = TradeMonitor::count();
+        $this->debug_total_records = Trade::count();
 
-        $query = TradeMonitor::query()
-                             ->whereNotNull('open_trade_id')
-                             ->whereHas('openTrade', function ($q) {
-                                 $q->where('status', 'open');
-                             })
-                             ->with([
-                                 'openTrade.symbol.quotes',
-                             ]);
+        $query = Trade::query()
+                      ->where('status', 'open')
+                      ->with([
+                          'symbol.quotes',
+                      ]);
 
         $this->debug_table_records_count = (clone $query)->count();
 
@@ -59,21 +56,21 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
             ->filters([
                 SelectFilter::make('symbol_code')
                             ->label('Symbol')
-                            ->options(fn () => TradeMonitor::query()
-                                                           ->select('symbol_code')
-                                                           ->distinct()
-                                                           ->orderBy('symbol_code')
-                                                           ->pluck('symbol_code', 'symbol_code')
-                                                           ->all()
+                            ->options(fn () => Trade::query()
+                                                     ->select('symbol_code')
+                                                     ->distinct()
+                                                     ->orderBy('symbol_code')
+                                                     ->pluck('symbol_code', 'symbol_code')
+                                                     ->all()
                             ),
                 SelectFilter::make('timeframe_code')
                             ->label('TF')
-                            ->options(fn () => TradeMonitor::query()
-                                                           ->select('timeframe_code')
-                                                           ->distinct()
-                                                           ->orderBy('timeframe_code')
-                                                           ->pluck('timeframe_code', 'timeframe_code')
-                                                           ->all()
+                            ->options(fn () => Trade::query()
+                                                     ->select('timeframe_code')
+                                                     ->distinct()
+                                                     ->orderBy('timeframe_code')
+                                                     ->pluck('timeframe_code', 'timeframe_code')
+                                                     ->all()
                             ),
             ])
             ->columns([
@@ -87,14 +84,14 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           ->label('TF')
                           ->sortable(),
 
-                TextColumn::make('openTrade.side')
+                TextColumn::make('side')
                           ->label('Side')
                           ->badge()
                           ->formatStateUsing(fn ($state) => $state ? strtoupper((string) $state) : '—')
                           ->color(fn ($state) => $state === 'buy' ? 'success' : ($state === 'sell' ? 'danger' : 'gray'))
                           ->sortable(),
 
-                TextColumn::make('openTrade.status')
+                TextColumn::make('status')
                           ->label('Status')
                           ->badge()
                           ->formatStateUsing(function ($state): string {
@@ -116,30 +113,24 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-                TextColumn::make('openTrade.opened_at')
+                TextColumn::make('reason')
+                          ->label('Reason')
+                          ->getStateUsing(fn (Trade $record) => (string) (data_get($record->meta, 'open.reason', '—')))
+                          ->wrap(),
+
+                TextColumn::make('opened_at')
                           ->label('Opened')
                           ->dateTime('Y-m-d H:i:s')
                           ->placeholder('—')
                           ->sortable(),
 
-                TextColumn::make('openTrade.closed_at')
-                          ->label('Closed')
-                          ->dateTime('Y-m-d H:i:s')
-                          ->placeholder('—')
-                          ->sortable(),
-
-                TextColumn::make('openTrade.entry_price')
+                TextColumn::make('entry_price')
                           ->label('Entry')
                           ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
                           ->sortable(),
 
-                TextColumn::make('openTrade.exit_price')
-                          ->label('Exit')
-                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
-                          ->sortable(),
-
-                TextColumn::make('openTrade.unrealized_points')
-                          ->label('Unrealized')
+                TextColumn::make('unrealized_points')
+                          ->label('Unrealized (pts)')
                           ->formatStateUsing(function ($state): string {
                               if ($state === null) {
                                   return '—';
@@ -162,58 +153,60 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-                TextColumn::make('openTrade.realized_points')
-                          ->label('P&L')
-                          ->formatStateUsing(function ($state): string {
-                              if ($state === null) {
-                                  return '—';
-                              }
-                              $v = (float) $state;
-                              return ($v > 0 ? '+' : '') . number_format($v, 2);
-                          })
-                          ->color(function ($state): string {
-                              if ($state === null) {
-                                  return 'gray';
-                              }
-                              $v = (float) $state;
-                              if ($v > 0) {
-                                  return 'success';
-                              }
-                              if ($v < 0) {
-                                  return 'danger';
-                              }
-                              return 'gray';
-                          })
-                          ->sortable(),
-
-                TextColumn::make('sl_left_points')
-                          ->label('SL left')
-                          ->getStateUsing(function (TradeMonitor $record): ?float {
-                              /** @var Trade|null $t */
-                              $t = $record->openTrade;
-                              if (!$t) {
+                TextColumn::make('unrealized_r')
+                          ->label('Unrealized (R)')
+                          ->getStateUsing(function (Trade $record): ?float {
+                              $risk = (float) ($record->stop_loss_points ?? 0);
+                              if ($risk <= 0) {
                                   return null;
                               }
 
-                              $priceNow = (float) ($t->symbol?->quotes?->price ?? 0);
-                              $pointSize = (float) ($t->symbol?->point_size ?? 0);
+                              $u = (float) ($record->unrealized_points ?? 0);
+                              return round($u / $risk, 2);
+                          })
+                          ->formatStateUsing(function ($state): string {
+                              if ($state === null) {
+                                  return '—';
+                              }
+                              $v = (float) $state;
+                              return ($v > 0 ? '+' : '') . number_format($v, 2);
+                          })
+                          ->color(function ($state): string {
+                              if ($state === null) {
+                                  return 'gray';
+                              }
+                              $v = (float) $state;
+                              if ($v > 0) {
+                                  return 'success';
+                              }
+                              if ($v < 0) {
+                                  return 'danger';
+                              }
+                              return 'gray';
+                          }),
+
+                TextColumn::make('sl_left_points')
+                          ->label('SL left')
+                          ->getStateUsing(function (Trade $record): ?float {
+                              $priceNow = (float) ($record->symbol?->quotes?->price ?? 0);
+                              $pointSize = (float) ($record->symbol?->point_size ?? 0);
 
                               if ($priceNow <= 0 || $pointSize <= 0) {
                                   return null;
                               }
 
-                              $entry = (float) ($t->entry_price ?? 0);
+                              $entry = (float) ($record->entry_price ?? 0);
                               if ($entry <= 0) {
                                   return null;
                               }
 
-                              $slPoints = (float) ($t->stop_loss_points ?? 0);
+                              $slPoints = (float) ($record->stop_loss_points ?? 0);
                               if ($slPoints <= 0) {
                                   return null;
                               }
 
-                              $side = (string) ($t->side ?? '');
-                              $exitStopPrice = data_get($t->meta, 'exit_stop.stop_price');
+                              $side = (string) ($record->side ?? '');
+                              $exitStopPrice = data_get($record->meta, 'exit_stop.stop_price');
 
                               $stopPrice = $exitStopPrice !== null
                                   ? (float) $exitStopPrice
@@ -237,61 +230,66 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-                TextColumn::make('tp_left_points')
-                          ->label('TP left')
-                          ->getStateUsing(function (TradeMonitor $record): ?float {
-                              /** @var Trade|null $t */
-                              $t = $record->openTrade;
-                              if (!$t) {
-                                  return null;
-                              }
-
-                              $priceNow = (float) ($t->symbol?->quotes?->price ?? 0);
-                              $pointSize = (float) ($t->symbol?->point_size ?? 0);
-
-                              if ($priceNow <= 0 || $pointSize <= 0) {
-                                  return null;
-                              }
-
-                              $entry = (float) ($t->entry_price ?? 0);
-                              if ($entry <= 0) {
-                                  return null;
-                              }
-
-                              $tpPoints = (float) ($t->take_profit_points ?? 0);
-                              if ($tpPoints <= 0) {
-                                  return null;
-                              }
-
-                              $side = (string) ($t->side ?? '');
-
-                              $tpPrice = $side === 'sell'
-                                  ? ($entry - ($tpPoints * $pointSize))
-                                  : ($entry + ($tpPoints * $pointSize));
-
-                              $left = $side === 'sell'
-                                  ? (($priceNow - $tpPrice) / $pointSize)
-                                  : (($tpPrice - $priceNow) / $pointSize);
-
-                              return round($left, 2);
-                          })
-                          ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 2))
-                          ->color(function ($state): string {
-                              if ($state === null) {
-                                  return 'gray';
-                              }
-                              return ((float) $state) <= 0 ? 'success' : 'gray';
-                          })
-                          ->sortable(),
-
-                TextColumn::make('openTrade.max_hold_minutes')
+                TextColumn::make('max_hold_minutes')
                           ->label('Max hold')
                           ->formatStateUsing(fn ($state) => $state === null ? '—' : (string) (int) $state)
                           ->sortable(),
 
                 TextColumn::make('expectation')
                           ->label('Expectation')
-                          ->getStateUsing(fn (TradeMonitor $record) => (string) ($record->expectation ?? '—'))
+                          ->getStateUsing(function (Trade $record): ?string {
+                              $entryTf = (string) ($record->timeframe_code ?? '');
+                              $lowerTf = match ($entryTf) {
+                                  '1d' => '4h',
+                                  '4h' => '1h',
+                                  '1h' => '30m',
+                                  '30m' => '15m',
+                                  '15m' => '5m',
+                                  default => null,
+                              };
+
+                              if (! $lowerTf) {
+                                  return '—';
+                              }
+
+                              $candle = Candle::query()
+                                  ->where('symbol_code', $record->symbol_code)
+                                  ->where('timeframe_code', $lowerTf)
+                                  ->orderByDesc('open_time_ms')
+                                  ->skip(1)
+                                  ->first();
+
+                              if (! $candle) {
+                                  return '—';
+                              }
+
+                              $o = (float) $candle->open;
+                              $h = (float) $candle->high;
+                              $l = (float) $candle->low;
+                              $c = (float) $candle->close;
+
+                              $haClose = ($o + $h + $l + $c) / 4;
+                              $haOpen = ($o + $c) / 2;
+
+                              $dir = match (true) {
+                                  $haClose > $haOpen => 'up',
+                                  $haClose < $haOpen => 'down',
+                                  default => 'flat',
+                              };
+
+                              $side = (string) ($record->side ?? '');
+                              $reversed = match ($side) {
+                                  'buy' => $dir === 'down',
+                                  'sell' => $dir === 'up',
+                                  default => false,
+                              };
+
+                              if ($reversed) {
+                                  return "Exit: lower TF reversed ({$lowerTf})";
+                              }
+
+                              return "OK: lower TF still in trend ({$lowerTf})";
+                          })
                           ->wrap(),
             ]);
     }

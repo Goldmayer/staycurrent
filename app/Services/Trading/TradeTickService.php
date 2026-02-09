@@ -2,10 +2,10 @@
 
 namespace App\Services\Trading;
 
+use App\Contracts\StrategySettingsRepository;
 use App\Enums\TradeStatus;
 use App\Models\Candle;
 use App\Models\Symbol;
-use App\Contracts\StrategySettingsRepository;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 
@@ -29,8 +29,6 @@ class TradeTickService
 
         $symbols = $symbolsQuery->get();
 
-        $cfg = $this->settings->get();
-
         $symbolsProcessed = 0;
         $tradesOpened = 0;
         $tradesSkipped = 0;
@@ -41,6 +39,12 @@ class TradeTickService
             'not_enough_candles' => 0,
             'existing_open_trade' => 0,
         ];
+
+        $risk = $this->settings->get()['risk'] ?? [];
+
+        $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);   // 0.3%
+        $tpPercent = (float) ($risk['take_profit_percent'] ?? 0.0);   // 0.0% (disabled by default)
+        $maxHoldCfg = (int) ($risk['max_hold_minutes'] ?? 120);
 
         foreach ($symbols as $symbol) {
             $symbolsProcessed++;
@@ -53,6 +57,8 @@ class TradeTickService
                 $skipped['missing_quote']++;
                 continue;
             }
+
+            $entryPrice = (float) $currentPrice;
 
             $quotePulledAt = $this->formatQuotePulledAt($quote);
 
@@ -92,17 +98,50 @@ class TradeTickService
                 continue;
             }
 
+            $pointSize = (float) $symbol->point_size;
+            if ($pointSize <= 0) {
+                $tradesSkipped++;
+                $skipped['invalid_point_size'] = ($skipped['invalid_point_size'] ?? 0) + 1;
+                continue;
+            }
+
+            // Compute points from percents if percent > 0, else fallback to fixed points
+            $fallbackSlPoints = (float) ($risk['stop_loss_points'] ?? 20);
+            $fallbackTpPoints = (float) ($risk['take_profit_points'] ?? 0);
+
+            $stopLossPoints = $slPercent > 0
+                ? round(($entryPrice * $slPercent) / $pointSize, 2)
+                : $fallbackSlPoints;
+
+            $takeProfitPoints = $tpPercent > 0
+                ? round(($entryPrice * $tpPercent) / $pointSize, 2)
+                : $fallbackTpPoints;
+
+            // Guards: if computed points <= 0, use fallback
+            if ($stopLossPoints <= 0) {
+                $stopLossPoints = $fallbackSlPoints;
+            }
+            if ($takeProfitPoints <= 0) {
+                $takeProfitPoints = $fallbackTpPoints;
+            }
+
             $hash = crc32($symbol->code . '|' . $timeframeCode . '|' . $side);
 
             $this->openTrade(
                 symbolCode: $symbol->code,
                 timeframeCode: $timeframeCode,
                 side: $side,
-                entryPrice: (float) $currentPrice,
+                entryPrice: $entryPrice,
                 quotePulledAt: $quotePulledAt,
                 hash: $hash,
                 candleCount: $candleCount,
-                decision: $decision
+                decision: $decision,
+                stopLossPoints: $stopLossPoints,
+                takeProfitPoints: $takeProfitPoints,
+                maxHoldMinutes: $maxHoldCfg,
+                pointSize: $pointSize,
+                stopLossPercent: $slPercent,
+                takeProfitPercent: $tpPercent,
             );
 
             $tradesOpened++;
@@ -155,10 +194,14 @@ class TradeTickService
         ?string $quotePulledAt,
         int $hash,
         int $candleCount,
-        array $decision
+        array $decision,
+        float $stopLossPoints,
+        float $takeProfitPoints,
+        int $maxHoldMinutes,
+        float $pointSize,
+        float $stopLossPercent,
+        float $takeProfitPercent,
     ): void {
-        $risk = $this->settings->get()['risk'];
-
         Trade::create([
             'symbol_code' => $symbolCode,
             'timeframe_code' => $timeframeCode,
@@ -166,9 +209,9 @@ class TradeTickService
             'status' => TradeStatus::OPEN->value,
             'entry_price' => $entryPrice,
             'opened_at' => now(),
-            'stop_loss_points' => $risk['stop_loss_points'],
-            'take_profit_points' => $risk['take_profit_points'],
-            'max_hold_minutes' => $risk['max_hold_minutes'],
+            'stop_loss_points' => $stopLossPoints,
+            'take_profit_points' => $takeProfitPoints,
+            'max_hold_minutes' => $maxHoldMinutes,
             'meta' => [
                 'source' => 'trade:tick',
                 'open' => [
@@ -182,9 +225,12 @@ class TradeTickService
                     'decision' => $decision,
                 ],
                 'risk' => [
-                    'stop_loss_points' => $risk['stop_loss_points'],
-                    'take_profit_points' => $risk['take_profit_points'],
-                    'max_hold_minutes' => $risk['max_hold_minutes'],
+                    'stop_loss_points' => $stopLossPoints,
+                    'take_profit_points' => $takeProfitPoints,
+                    'max_hold_minutes' => $maxHoldMinutes,
+                    'stop_loss_percent' => $stopLossPercent,
+                    'take_profit_percent' => $takeProfitPercent,
+                    'point_size' => $pointSize,
                 ],
             ],
         ]);

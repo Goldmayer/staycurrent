@@ -25,9 +25,14 @@ class TradeCloseService
     {
         $cfg = $this->settings->get();
         $trailingCfg = $cfg['risk']['trailing'] ?? [];
+
         $trailingEnabled = (bool) ($trailingCfg['enabled'] ?? false);
-        $activationPoints = (float) ($trailingCfg['activation_points'] ?? 30);
-        $distancePoints = (float) ($trailingCfg['distance_points'] ?? 25);
+
+        $activationPercent = (float) ($trailingCfg['activation_percent'] ?? 0.0);
+        $distancePercent = (float) ($trailingCfg['distance_percent'] ?? 0.0);
+
+        $activationPointsFallback = (float) ($trailingCfg['activation_points'] ?? 30);
+        $distancePointsFallback = (float) ($trailingCfg['distance_points'] ?? 25);
 
         $query = Trade::query()
                       ->where('status', TradeStatus::OPEN->value)
@@ -66,8 +71,10 @@ class TradeCloseService
                 &$exitStopMoved,
                 &$exitStopHit,
                 $trailingEnabled,
-                $activationPoints,
-                $distancePoints
+                $activationPercent,
+                $distancePercent,
+                $activationPointsFallback,
+                $distancePointsFallback
             ) {
                 /** @var Trade|null $trade */
                 $trade = Trade::query()
@@ -132,51 +139,67 @@ class TradeCloseService
                 // ------------------------------------------------------------
                 // 0) TRAILING STOP (tighten stop in profit)
                 // ------------------------------------------------------------
-                if ($trailingEnabled && $unrealizedPoints >= $activationPoints) {
-                    $side = (string) $trade->side;
+                if ($trailingEnabled) {
+                    $entry = (float) $trade->entry_price;
 
-                    $existingExitStop = $meta['exit_stop'] ?? null;
-                    $existingStopPrice = (is_array($existingExitStop) && isset($existingExitStop['stop_price']))
-                        ? (float) $existingExitStop['stop_price']
-                        : null;
+                    $activationPoints = $activationPercent > 0
+                        ? round((($entry * $activationPercent) / $pointSize), 2)
+                        : (float) $activationPointsFallback;
 
-                    // Base SL price if no stop exists yet
-                    if ($existingStopPrice === null) {
-                        $entry = (float) $trade->entry_price;
-                        $sl = $this->slPoints($trade);
-                        $existingStopPrice = $side === 'buy'
-                            ? ($entry - ($sl * $pointSize))
-                            : ($entry + ($sl * $pointSize));
-                    }
+                    $distancePoints = $distancePercent > 0
+                        ? round((($entry * $distancePercent) / $pointSize), 2)
+                        : (float) $distancePointsFallback;
 
-                    $candidate = $side === 'buy'
-                        ? ($priceNow - ($distancePoints * $pointSize))
-                        : ($priceNow + ($distancePoints * $pointSize));
+                    if ($activationPoints > 0 && $distancePoints > 0 && $unrealizedPoints >= $activationPoints) {
+                        $side = (string) $trade->side;
 
-                    $shouldUpdate = $side === 'buy'
-                        ? ($candidate > $existingStopPrice)
-                        : ($candidate < $existingStopPrice);
+                        $existingExitStop = $meta['exit_stop'] ?? null;
+                        $existingStopPrice = (is_array($existingExitStop) && isset($existingExitStop['stop_price']))
+                            ? (float) $existingExitStop['stop_price']
+                            : null;
 
-                    if ($shouldUpdate) {
-                        $exitStop = is_array($existingExitStop) ? $existingExitStop : [];
+                        if ($existingStopPrice === null) {
+                            $sl = $this->slPoints($trade);
+                            $existingStopPrice = $side === 'buy'
+                                ? ($entry - ($sl * $pointSize))
+                                : ($entry + ($sl * $pointSize));
+                        }
 
-                        // do NOT wipe existing fields; just tighten stop
-                        $exitStop['armed_at'] = now()->toDateTimeString();
-                        $exitStop['reason'] = 'profit_trailing';
-                        $exitStop['stop_price'] = $candidate;
+                        $distancePrice = $distancePoints * $pointSize;
 
-                        $exitStop['trail_activation_points'] = $activationPoints;
-                        $exitStop['trail_distance_points'] = $distancePoints;
-                        $exitStop['trail_price_now_at_update'] = $priceNow;
-                        $exitStop['trail_previous_stop_price'] = $existingStopPrice;
-                        $exitStop['trail_candidate_stop_price'] = $candidate;
+                        $candidate = $side === 'buy'
+                            ? ($priceNow - $distancePrice)
+                            : ($priceNow + $distancePrice);
 
-                        $meta['exit_stop'] = $exitStop;
+                        $shouldUpdate = $side === 'buy'
+                            ? ($candidate > $existingStopPrice)
+                            : ($candidate < $existingStopPrice);
 
-                        $trade->meta = $meta;
-                        $trade->save();
+                        if ($shouldUpdate) {
+                            $exitStop = is_array($existingExitStop) ? $existingExitStop : [];
 
-                        $exitStopMoved++;
+                            $exitStop['armed_at'] = now()->toDateTimeString();
+                            $exitStop['reason'] = 'profit_trailing';
+                            $exitStop['stop_price'] = $candidate;
+
+                            $exitStop['trail_activation_percent'] = $activationPercent;
+                            $exitStop['trail_distance_percent'] = $distancePercent;
+                            $exitStop['trail_activation_points_computed'] = $activationPoints;
+                            $exitStop['trail_distance_points_computed'] = $distancePoints;
+                            $exitStop['trail_entry_price'] = $entry;
+                            $exitStop['trail_point_size'] = $pointSize;
+
+                            $exitStop['trail_price_now_at_update'] = $priceNow;
+                            $exitStop['trail_previous_stop_price'] = $existingStopPrice;
+                            $exitStop['trail_candidate_stop_price'] = $candidate;
+
+                            $meta['exit_stop'] = $exitStop;
+
+                            $trade->meta = $meta;
+                            $trade->save();
+
+                            $exitStopMoved++;
+                        }
                     }
                 }
 
@@ -201,6 +224,9 @@ class TradeCloseService
                             side: (string) $trade->side
                         );
 
+                        $riskPoints = $this->slPoints($trade);
+                        $rMultiple = $riskPoints > 0 ? round($realizedPoints / $riskPoints, 2) : null;
+
                         $meta['close'] = [
                             'source' => 'trade:close',
                             'reason' => 'exit_stop_hit',
@@ -211,6 +237,7 @@ class TradeCloseService
                             'exit_price_mode' => 'level',
                             'exit_price_level' => $stopPrice,
                             'price_now' => $priceNow,
+                            'r_multiple' => $rMultiple,
                         ];
 
                         $trade->status = TradeStatus::CLOSED;
@@ -228,7 +255,7 @@ class TradeCloseService
                 }
 
                 // ------------------------------------------------------------
-                // 2) HARD EXITS (SL/TP/Time) with execution at LEVEL (not priceNow)
+                // 2) HARD EXITS (SL/TP/Time) with execution at LEVEL
                 // ------------------------------------------------------------
                 $hard = $this->detectHardExit($trade, $priceNow, $pointSize);
 
@@ -241,6 +268,9 @@ class TradeCloseService
                         pointSize: $pointSize,
                         side: (string) $trade->side
                     );
+
+                    $riskPoints = $this->slPoints($trade);
+                    $rMultiple = $riskPoints > 0 ? round($realizedPoints / $riskPoints, 2) : null;
 
                     $meta['close'] = [
                         'source' => 'trade:close',
@@ -258,6 +288,7 @@ class TradeCloseService
                         'exit_price_mode' => (string) ($hard['exit_price_mode'] ?? 'level'),
                         'exit_price_level' => (float) ($hard['exit_price_level'] ?? $exitPrice),
                         'price_now' => $priceNow,
+                        'r_multiple' => $rMultiple,
                     ];
 
                     $trade->status = TradeStatus::CLOSED;
@@ -310,7 +341,6 @@ class TradeCloseService
                 }
 
                 $minPoints = $this->slPoints($trade);
-                $minDist = $minPoints * $pointSize;
 
                 $side = (string) $trade->side;
                 $currentStop = null;
@@ -321,6 +351,7 @@ class TradeCloseService
                 if ($side === 'buy') {
                     $candleLevel = (float) $prevTradeCandle->low;
 
+                    $minDist = $minPoints * $pointSize;
                     $maxAllowed = $priceNow - $minDist;
                     $candidate = min($candleLevel, $maxAllowed);
 
@@ -353,6 +384,7 @@ class TradeCloseService
 
                 $candleLevel = (float) $prevTradeCandle->high;
 
+                $minDist = $minPoints * $pointSize;
                 $minAllowed = $priceNow + $minDist;
                 $candidate = max($candleLevel, $minAllowed);
 
@@ -390,10 +422,8 @@ class TradeCloseService
             'skipped_missing_quote' => $skippedMissingQuote,
             'skipped_stale_quote' => $skippedStaleQuote,
             'skipped_missing_symbol' => $skippedMissingSymbol,
-
             'skipped_not_enough_candles' => 0,
             'skipped_no_reversal' => 0,
-
             'exit_stop_armed' => $exitStopMoved,
             'exit_stop_hit' => $exitStopHit,
         ];
@@ -476,13 +506,13 @@ class TradeCloseService
     private function slPoints(Trade $trade): float
     {
         $v = (float) ($trade->stop_loss_points ?? 0);
-        return $v > 0 ? $v : 20.0;
+        return max(0.0, $v);
     }
 
     private function tpPoints(Trade $trade): float
     {
         $v = (float) ($trade->take_profit_points ?? 0);
-        return $v > 0 ? $v : 60.0;
+        return max(0.0, $v);
     }
 
     private function maxHoldMinutes(Trade $trade): int

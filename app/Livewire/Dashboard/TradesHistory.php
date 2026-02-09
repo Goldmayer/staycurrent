@@ -2,7 +2,6 @@
 
 namespace App\Livewire\Dashboard;
 
-use App\Enums\TradeStatus;
 use App\Models\Trade;
 use Filament\Actions\Concerns\InteractsWithActions;
 use Filament\Actions\Contracts\HasActions;
@@ -60,6 +59,7 @@ class TradesHistory extends Component implements HasActions, HasForms, HasTable
                                                     ->pluck('symbol_code', 'symbol_code')
                                                     ->all()
                             ),
+
                 SelectFilter::make('timeframe_code')
                             ->label('TF')
                             ->options(fn () => Trade::query()
@@ -69,6 +69,7 @@ class TradesHistory extends Component implements HasActions, HasForms, HasTable
                                                     ->pluck('timeframe_code', 'timeframe_code')
                                                     ->all()
                             ),
+
                 SelectFilter::make('status')
                             ->label('Status')
                             ->options([
@@ -107,13 +108,7 @@ class TradesHistory extends Component implements HasActions, HasForms, HasTable
                           })
                           ->color(function ($state): string {
                               $value = $state instanceof \BackedEnum ? $state->value : (string) $state;
-                              if ($value === 'open') {
-                                  return 'info';
-                              }
-                              if ($value === 'closed') {
-                                  return 'gray';
-                              }
-                              return 'gray';
+                              return $value === 'open' ? 'info' : 'gray';
                           })
                           ->sortable(),
 
@@ -139,8 +134,9 @@ class TradesHistory extends Component implements HasActions, HasForms, HasTable
                           ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 8))
                           ->sortable(),
 
-                TextColumn::make('realized_points')->summarize(Sum::make())
-                          ->label('P&L')
+                TextColumn::make('realized_points')
+                          ->summarize(Sum::make())
+                          ->label('P&L (pts)')
                           ->formatStateUsing(function ($state): string {
                               if ($state === null) {
                                   return '—';
@@ -162,6 +158,37 @@ class TradesHistory extends Component implements HasActions, HasForms, HasTable
                               return 'gray';
                           })
                           ->sortable(),
+
+                // Важно: НЕ summarize() и НЕ sortable() — иначе Filament полезет в SQL как в trades.r_multiple
+                TextColumn::make('r_multiple')
+                          ->label('R')
+                          ->getStateUsing(function (Trade $record): ?float {
+                              $v = data_get($record->meta, 'close.r_multiple');
+                              if ($v === null || $v === '') {
+                                  return null;
+                              }
+                              return (float) $v;
+                          })
+                          ->formatStateUsing(function ($state): string {
+                              if ($state === null) {
+                                  return '—';
+                              }
+                              $v = (float) $state;
+                              return ($v > 0 ? '+' : '') . number_format($v, 2);
+                          })
+                          ->color(function ($state): string {
+                              if ($state === null) {
+                                  return 'gray';
+                              }
+                              $v = (float) $state;
+                              if ($v > 0) {
+                                  return 'success';
+                              }
+                              if ($v < 0) {
+                                  return 'danger';
+                              }
+                              return 'gray';
+                          }),
             ]);
     }
 

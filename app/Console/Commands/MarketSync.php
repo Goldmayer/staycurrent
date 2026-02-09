@@ -55,9 +55,19 @@ class MarketSync extends Command
 
         $this->info("Syncing {$symbols->count()} active symbols...");
 
-        foreach ($symbols as $symbol) {
-            $this->line("{$symbol->code}:");
-            $this->syncSingleSymbol($syncService, $symbol->code, $onlyQuotes, $onlyCandles, $limit);
+        if (!$onlyCandles) {
+            // Use batch quotes for all symbols (FX symbols will use batch provider, others will use individual)
+            $symbolCodes = $symbols->pluck('code')->toArray();
+            $syncService->syncFxQuotes($symbolCodes);
+            $this->info("  ✓ Quotes synced (batch)");
+        }
+
+        if (!$onlyQuotes) {
+            foreach ($symbols as $symbol) {
+                $this->line("{$symbol->code}:");
+                $syncService->syncSymbolCandles($symbol->code, $limit);
+                $this->info("  ✓ Candles synced");
+            }
         }
     }
 }
