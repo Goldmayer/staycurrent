@@ -4,6 +4,7 @@ namespace App\Livewire\Dashboard;
 
 use App\Models\Candle;
 use App\Models\Trade;
+use Carbon\CarbonImmutable;
 use Filament\Actions\Concerns\InteractsWithActions;
 use Filament\Actions\Contracts\HasActions;
 use Filament\Forms\Concerns\InteractsWithForms;
@@ -37,6 +38,41 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
         $this->resetTable();
     }
 
+    private function timeframeMs(string $tf): int
+    {
+        return match ($tf) {
+            '5m' => 5 * 60 * 1000,
+            '15m' => 15 * 60 * 1000,
+            '30m' => 30 * 60 * 1000,
+            '1h' => 60 * 60 * 1000,
+            '4h' => 4 * 60 * 60 * 1000,
+            '1d' => 24 * 60 * 60 * 1000,
+            default => 60 * 60 * 1000,
+        };
+    }
+
+    private function isQuoteStale(?\DateTimeInterface $pulledAt): bool
+    {
+        if (! $pulledAt) {
+            return true;
+        }
+
+        return CarbonImmutable::instance($pulledAt)->lt(now()->subMinutes(12));
+    }
+
+    private function isCandleStale(?int $lastOpenMs, string $tf): bool
+    {
+        if (! $lastOpenMs) {
+            return true;
+        }
+
+        $lastCloseMs = $lastOpenMs + $this->timeframeMs($tf);
+        $ageSeconds = (int) floor(((int) now()->getTimestamp() * 1000 - $lastCloseMs) / 1000);
+        $thresholdSeconds = (int) ceil(($this->timeframeMs($tf) / 1000) * 2.2);
+
+        return $ageSeconds > $thresholdSeconds;
+    }
+
     public function table(Table $table): Table
     {
         $this->debug_total_records = Trade::count();
@@ -45,6 +81,12 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                       ->where('status', 'open')
                       ->with([
                           'symbol.quotes',
+                      ])
+                      ->addSelect([
+                          'last_candle_open_time_ms' => Candle::query()
+                                                              ->selectRaw('MAX(open_time_ms)')
+                                                              ->whereColumn('candles.symbol_code', 'trades.symbol_code')
+                                                              ->whereColumn('candles.timeframe_code', 'trades.timeframe_code'),
                       ]);
 
         $this->debug_table_records_count = (clone $query)->count();
@@ -57,20 +99,20 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                 SelectFilter::make('symbol_code')
                             ->label('Symbol')
                             ->options(fn () => Trade::query()
-                                                     ->select('symbol_code')
-                                                     ->distinct()
-                                                     ->orderBy('symbol_code')
-                                                     ->pluck('symbol_code', 'symbol_code')
-                                                     ->all()
+                                                    ->select('symbol_code')
+                                                    ->distinct()
+                                                    ->orderBy('symbol_code')
+                                                    ->pluck('symbol_code', 'symbol_code')
+                                                    ->all()
                             ),
                 SelectFilter::make('timeframe_code')
                             ->label('TF')
                             ->options(fn () => Trade::query()
-                                                     ->select('timeframe_code')
-                                                     ->distinct()
-                                                     ->orderBy('timeframe_code')
-                                                     ->pluck('timeframe_code', 'timeframe_code')
-                                                     ->all()
+                                                    ->select('timeframe_code')
+                                                    ->distinct()
+                                                    ->orderBy('timeframe_code')
+                                                    ->pluck('timeframe_code', 'timeframe_code')
+                                                    ->all()
                             ),
             ])
             ->columns([
@@ -113,6 +155,55 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
+                TextColumn::make('quote_freshness')
+                          ->label('Quote')
+                          ->getStateUsing(function (Trade $record): string {
+                              $pulledAt = $record->symbol?->quotes?->pulled_at ?? $record->symbol?->quotes?->updated_at;
+                              if (! $pulledAt) {
+                                  return '—';
+                              }
+                              return CarbonImmutable::instance($pulledAt)->diffForHumans();
+                          })
+                          ->color(function (Trade $record): string {
+                              $pulledAt = $record->symbol?->quotes?->pulled_at ?? $record->symbol?->quotes?->updated_at;
+                              return $this->isQuoteStale($pulledAt) ? 'danger' : 'success';
+                          })
+                          ->tooltip(function (Trade $record): ?string {
+                              $pulledAt = $record->symbol?->quotes?->pulled_at ?? $record->symbol?->quotes?->updated_at;
+                              return $pulledAt ? CarbonImmutable::instance($pulledAt)->format('Y-m-d H:i:s') : null;
+                          }),
+
+                TextColumn::make('candle_freshness')
+                          ->label('Candles')
+                          ->getStateUsing(function (Trade $record): string {
+                              $lastOpenMs = (int) ($record->last_candle_open_time_ms ?? 0);
+                              if ($lastOpenMs <= 0) {
+                                  return '—';
+                              }
+
+                              return CarbonImmutable::createFromTimestampMs($lastOpenMs)->diffForHumans();
+                          })
+                          ->color(function (Trade $record): string {
+                              $tf = (string) ($record->timeframe_code ?? '1h');
+                              $lastOpenMs = (int) ($record->last_candle_open_time_ms ?? 0);
+
+                              if ($lastOpenMs <= 0) {
+                                  return 'danger';
+                              }
+
+                              // свеча считается устаревшей если старше ~2 таймфреймов
+                              $ageSeconds = now()->diffInSeconds(CarbonImmutable::createFromTimestampMs($lastOpenMs));
+                              $threshold = ($this->timeframeMs($tf) / 1000) * 2.2;
+
+                              return $ageSeconds > $threshold ? 'danger' : 'success';
+                          })
+                          ->tooltip(function (Trade $record): ?string {
+                              $lastOpenMs = (int) ($record->last_candle_open_time_ms ?? 0);
+                              return $lastOpenMs > 0
+                                  ? CarbonImmutable::createFromTimestampMs($lastOpenMs)->format('Y-m-d H:i:s')
+                                  : null;
+                          }),
+
 
                 TextColumn::make('entry_reason')
                           ->label('Entry Reason')
@@ -148,7 +239,7 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                 TextColumn::make('entry_price')
                           ->label('Entry')
-                    ->formatStateUsing(fn ($state) => number_format((float) $state, 4, '.', ''))
+                          ->formatStateUsing(fn ($state) => number_format((float) $state, 4, '.', ''))
                           ->sortable(),
 
                 TextColumn::make('unrealized_points')
@@ -252,14 +343,13 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                           })
                           ->sortable(),
 
-
                 TextColumn::make('expectation')
                           ->label('Expectation')
-                    ->color(fn (?string $state): string => match (true) {
-                        is_string($state) && str_starts_with($state, 'OK:') => 'success',
-                        is_string($state) && str_starts_with($state, 'Exit:') => 'danger',
-                        default => 'gray',
-                    })
+                          ->color(fn (?string $state): string => match (true) {
+                              is_string($state) && str_starts_with($state, 'OK:') => 'success',
+                              is_string($state) && str_starts_with($state, 'Exit:') => 'danger',
+                              default => 'gray',
+                          })
                           ->getStateUsing(function (Trade $record): ?string {
                               $entryTf = (string) ($record->timeframe_code ?? '');
                               $lowerTf = match ($entryTf) {
@@ -276,11 +366,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                               }
 
                               $candle = Candle::query()
-                                  ->where('symbol_code', $record->symbol_code)
-                                  ->where('timeframe_code', $lowerTf)
-                                  ->orderByDesc('open_time_ms')
-                                  ->skip(1)
-                                  ->first();
+                                              ->where('symbol_code', $record->symbol_code)
+                                              ->where('timeframe_code', $lowerTf)
+                                              ->orderByDesc('open_time_ms')
+                                              ->skip(1)
+                                              ->first();
 
                               if (! $candle) {
                                   return '—';

@@ -51,10 +51,6 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
                                     'apikey' => $apiKey,
                                 ]);
 
-                if ($response->status() === 429) {
-                    $response->throw();
-                }
-
                 $response->throw();
 
                 return $response->json();
@@ -67,6 +63,10 @@ class TwelveDataFxQuotesProvider implements FxQuotesProvider
             return $this->filterToRequested($mapped, $codes);
         } catch (Throwable $e) {
             if ($this->isRateLimited($e, $e instanceof RequestException ? $e->response : null)) {
+                if ($e instanceof \RuntimeException && str_contains($e->getMessage(), 'TwelveData rate limit')) {
+                    Log::error('[TwelveData] ALL KEYS EXHAUSTED — throwing exception');
+                    throw $e;
+                }
                 Log::warning('[TwelveData] quotes exhausted -> returning empty quotes');
                 return [];
             }

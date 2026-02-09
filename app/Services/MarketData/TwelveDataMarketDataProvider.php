@@ -139,10 +139,6 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
                                 ->acceptJson()
                                 ->get($this->baseUrl . $path, $q);
 
-                if ($response->status() === 429) {
-                    $response->throw();
-                }
-
                 $json = $response->json();
 
                 if (is_array($json)
@@ -152,9 +148,7 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
                     throw new TwelveDataRateLimitedException('TwelveData rate limited');
                 }
 
-                if ($response->failed()) {
-                    $response->throw();
-                }
+                $response->throw();
 
                 return $json;
             });
