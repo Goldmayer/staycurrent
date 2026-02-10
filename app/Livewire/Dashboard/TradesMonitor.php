@@ -4,6 +4,7 @@ namespace App\Livewire\Dashboard;
 
 use App\Models\Candle;
 use App\Models\Trade;
+use App\Services\Trading\PriceWindowService;
 use Carbon\CarbonImmutable;
 use Filament\Actions\Concerns\InteractsWithActions;
 use Filament\Actions\Contracts\HasActions;
@@ -191,7 +192,6 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                                   return 'danger';
                               }
 
-                              // свеча считается устаревшей если старше ~2 таймфреймов
                               $ageSeconds = now()->diffInSeconds(CarbonImmutable::createFromTimestampMs($lastOpenMs));
                               $threshold = ($this->timeframeMs($tf) / 1000) * 2.2;
 
@@ -203,7 +203,6 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                                   ? CarbonImmutable::createFromTimestampMs($lastOpenMs)->format('Y-m-d H:i:s')
                                   : null;
                           }),
-
 
                 TextColumn::make('entry_reason')
                           ->label('Entry Reason')
@@ -365,39 +364,50 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                                   return '—';
                               }
 
-                              $candle = Candle::query()
-                                              ->where('symbol_code', $record->symbol_code)
-                                              ->where('timeframe_code', $lowerTf)
-                                              ->orderByDesc('open_time_ms')
-                                              ->skip(1)
-                                              ->first();
+                              $priceWindows = (array) config('trading.strategy.price_windows', []);
+                              $flatThresholdPct = (float) ($priceWindows['dir_flat_threshold_pct'] ?? 0.0001);
 
-                              if (! $candle) {
+                              $tfCfg = (array) (($priceWindows['timeframes'][$lowerTf] ?? null) ?? []);
+                              $minutes = (int) ($tfCfg['minutes'] ?? 0);
+                              $points = (int) ($tfCfg['points'] ?? 0);
+
+                              if ($minutes <= 0 || $points <= 0) {
                                   return '—';
                               }
 
-                              $o = (float) $candle->open;
-                              $h = (float) $candle->high;
-                              $l = (float) $candle->low;
-                              $c = (float) $candle->close;
+                              /** @var PriceWindowService $svc */
+                              $svc = app(PriceWindowService::class);
 
-                              $haClose = ($o + $h + $l + $c) / 4;
-                              $haOpen = ($o + $c) / 2;
+                              $w = $svc->window(
+                                  symbolCode: (string) $record->symbol_code,
+                                  minutes: $minutes,
+                                  points: $points,
+                                  dirFlatThresholdPct: $flatThresholdPct
+                              );
 
-                              $dir = match (true) {
-                                  $haClose > $haOpen => 'up',
-                                  $haClose < $haOpen => 'down',
-                                  default => 'flat',
-                              };
+                              $dir = (string) ($w['dir'] ?? 'no_data');
+                              if ($dir === 'no_data') {
+                                  return '—';
+                              }
 
+                              if ($dir === 'flat') {
+                                  return "OK: lower TF flat ({$lowerTf})";
+                              }
+
+                              $dirPct = isset($w['dir_pct']) ? (float) $w['dir_pct'] : null;
+
+                              $minStrength = (float) (config('trading.exit.reversal_min_strength_pct', 0.00015));
                               $side = (string) ($record->side ?? '');
-                              $reversed = match ($side) {
+
+                              $against = match ($side) {
                                   'buy' => $dir === 'down',
                                   'sell' => $dir === 'up',
                                   default => false,
                               };
 
-                              if ($reversed) {
+                              $strongEnough = $dirPct !== null && $dirPct >= $minStrength;
+
+                              if ($against && $strongEnough) {
                                   return "Exit: lower TF reversed ({$lowerTf})";
                               }
 

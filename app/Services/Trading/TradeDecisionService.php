@@ -28,8 +28,9 @@ class TradeDecisionService
         $timeframes = $cfg['timeframes'];
         $weights = $cfg['weights'];
         $threshold = (int) $cfg['total_threshold'];
-        $dirFlatThresholdPct = (float) $cfg['price_windows']['dir_flat_threshold_pct'];
-        $tfConfigs = $cfg['price_windows']['timeframes'];
+        $priceWindows = $cfg['price_windows'] ?? config('trading.strategy.price_windows', []);
+        $dirFlatThresholdPct = (float) ($priceWindows['dir_flat_threshold_pct'] ?? 0.0001);
+        $tfConfigs = (array) ($priceWindows['timeframes'] ?? []);
 
         $dirs = [];
         $windows = [];

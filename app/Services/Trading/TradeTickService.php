@@ -13,6 +13,7 @@ class TradeTickService
     public function __construct(
         private readonly TradeDecisionService $decision,
         private readonly StrategySettingsRepository $settings,
+        private readonly FxSessionScheduler $fxSessionScheduler,
     ) {
     }
 
@@ -45,6 +46,7 @@ class TradeTickService
             'existing_open_trade' => 0,
             'invalid_point_size' => 0,
             'invalid_force_params' => 0,
+            'session_closed' => 0,
         ];
 
         $risk = $this->settings->get()['risk'] ?? [];
@@ -88,6 +90,13 @@ class TradeTickService
                 ];
             } else {
                 $decision = $this->decision->decideOpen($symbol->code);
+            }
+
+            // Check if we're in a trading window for new entries
+            if (!$forceOpen && !$this->fxSessionScheduler->isInTradingWindow($symbol->code, now())) {
+                $tradesSkipped++;
+                $skipped['session_closed']++;
+                continue;
             }
 
             if (($decision['action'] ?? 'hold') !== 'open') {
