@@ -15,13 +15,41 @@ class FxSessionScheduler
             'timezone' => 'UTC',
             'fast_interval_minutes' => 1,
             'slow_interval_minutes' => 30,
-            'warmup_minutes' => 60,
-            'cooldown_minutes' => 120,
             'sessions' => [
-                'sydney' => ['start' => '22:00', 'end' => '07:00'],
-                'tokyo' => ['start' => '00:00', 'end' => '09:00'],
-                'london' => ['start' => '08:00', 'end' => '17:00'],
-                'newyork' => ['start' => '13:00', 'end' => '22:00'],
+                'sydney' => [
+                    'start' => '22:00',
+                    'end' => '07:00',
+                    'warmup_minutes' => 60,
+                    'cooldown_minutes' => 120,
+                ],
+                'tokyo' => [
+                    'start' => '00:00',
+                    'end' => '09:00',
+                    'warmup_minutes' => 30,
+                    'cooldown_minutes' => 60,
+                ],
+                'london' => [
+                    'start' => '08:00',
+                    'end' => '17:00',
+                    'warmup_minutes' => 60,
+                    'cooldown_minutes' => 120,
+                ],
+                'newyork' => [
+                    'start' => '13:00',
+                    'end' => '22:00',
+                    'warmup_minutes' => 60,
+                    'cooldown_minutes' => 120,
+                ],
+            ],
+            'currencies' => [
+                'JPY' => ['tokyo'],
+                'EUR' => ['london'],
+                'GBP' => ['london'],
+                'USD' => ['newyork'],
+                'CAD' => ['newyork'],
+                'AUD' => ['sydney'],
+                'NZD' => ['sydney'],
+                'CHF' => ['london'],
             ],
         ]);
     }
@@ -78,28 +106,91 @@ class FxSessionScheduler
         $base = substr($symbolCode, 0, 3);
         $quote = substr($symbolCode, 3, 3);
 
-        $sessions = [];
+        $mappedSessions = [];
 
-        if (in_array($base, ['AUD', 'NZD'], true) || in_array($quote, ['AUD', 'NZD'], true)) {
-            $sessions[] = 'sydney';
+        // Get sessions for base currency
+        if (isset($this->config['currencies'][$base])) {
+            $mappedSessions = array_merge($mappedSessions, $this->config['currencies'][$base]);
         }
 
-        if (in_array($base, ['JPY'], true) || in_array($quote, ['JPY'], true)) {
-            $sessions[] = 'tokyo';
+        // Get sessions for quote currency
+        if (isset($this->config['currencies'][$quote])) {
+            $mappedSessions = array_merge($mappedSessions, $this->config['currencies'][$quote]);
         }
 
-        if (in_array($base, ['EUR', 'GBP', 'CHF'], true) || in_array($quote, ['EUR', 'GBP', 'CHF'], true)) {
-            $sessions[] = 'london';
-        }
-
-        if (in_array($base, ['USD', 'CAD'], true) || in_array($quote, ['USD', 'CAD'], true)) {
-            $sessions[] = 'newyork';
-        }
-
-        return $sessions;
+        // Remove duplicates and return unique sessions
+        return array_values(array_unique($mappedSessions));
     }
 
-    private function isSessionActive(string $sessionName, CarbonInterface $now): bool
+    public function debug(string $symbolCode, CarbonInterface $now, ?\DateTimeInterface $lastPulledAt, bool $hasOpenTrade): array
+    {
+        $nowCarbon = Carbon::instance($now)->setTimezone($this->config['timezone']);
+
+        $base = substr($symbolCode, 0, 3);
+        $quote = substr($symbolCode, 3, 3);
+
+        $mappedSessions = $this->getMappedSessions($symbolCode);
+        $activeSessions = [];
+
+        foreach ($mappedSessions as $sessionName) {
+            if ($this->isSessionActive($sessionName, $nowCarbon)) {
+                $activeSessions[] = $sessionName;
+            }
+        }
+
+        $inTradingWindow = $this->isInTradingWindow($symbolCode, $nowCarbon);
+        $intervalMinutes = $this->syncIntervalMinutes($symbolCode, $nowCarbon, $hasOpenTrade);
+        $isDue = $this->isQuoteDue($lastPulledAt, $intervalMinutes, $nowCarbon);
+
+        return [
+            'symbol' => $symbolCode,
+            'now' => $nowCarbon->toDateTimeString(),
+            'timezone' => $this->config['timezone'],
+            'base' => $base,
+            'quote' => $quote,
+            'mapped_sessions' => $mappedSessions,
+            'active_sessions' => $activeSessions,
+            'in_trading_window' => $inTradingWindow,
+            'has_open_trade' => $hasOpenTrade,
+            'interval_minutes' => $intervalMinutes,
+            'last_pulled_at' => $lastPulledAt
+                ? Carbon::instance($lastPulledAt)->setTimezone($this->config['timezone'])->toDateTimeString()
+                : null,
+            'is_due' => $isDue,
+        ];
+    }
+
+    public function mappedSessions(string $symbolCode): array
+    {
+        return $this->getMappedSessions($symbolCode);
+    }
+
+    public function sessionWindowForNow(string $sessionName, CarbonInterface $now): array
+    {
+        $session = $this->config['sessions'][$sessionName];
+        $tz = (string) $this->config['timezone'];
+        $now = Carbon::instance($now)->setTimezone($tz);
+
+        $start = Carbon::createFromFormat('Y-m-d H:i', $now->format('Y-m-d') . ' ' . $session['start'], $tz);
+        $end = Carbon::createFromFormat('Y-m-d H:i', $now->format('Y-m-d') . ' ' . $session['end'], $tz);
+
+        if ($end <= $start) {
+            $end->addDay();
+        }
+
+        $warmup = (int) ($session['warmup_minutes'] ?? 0);
+        $cooldown = (int) ($session['cooldown_minutes'] ?? 0);
+
+        $windowStart = $start->copy()->subMinutes($warmup);
+        $windowEnd = $end->copy()->addMinutes($cooldown);
+
+        return [
+            'window_start' => $windowStart,
+            'window_end' => $windowEnd,
+        ];
+    }
+
+    public function isSessionActive(string $sessionName, CarbonInterface $now): bool
     {
         $session = $this->config['sessions'][$sessionName];
 
@@ -113,22 +204,25 @@ class FxSessionScheduler
             $end->addDay();
         }
 
-        $warmup = (int) ($this->config['warmup_minutes'] ?? 0);
-        $cooldown = (int) ($this->config['cooldown_minutes'] ?? 0);
+        $warmup = (int) ($session['warmup_minutes'] ?? 0);
+        $cooldown = (int) ($session['cooldown_minutes'] ?? 0);
 
         $windowStart = $start->copy()->subMinutes($warmup);
         $windowEnd = $end->copy()->addMinutes($cooldown);
 
-        // Also handle the "after midnight" part for cross-midnight sessions:
-        // if now is before start time (early day), compare against the window shifted back by 1 day.
-        if ($now->lt($windowStart) && $end->gt($start)) {
-            $altStart = $windowStart->copy()->subDay();
-            $altEnd = $windowEnd->copy()->subDay();
-            if ($now->between($altStart, $altEnd)) {
-                return true;
-            }
+        // Check if now is between windowStart and windowEnd
+        if ($now->between($windowStart, $windowEnd)) {
+            return true;
         }
 
-        return $now->between($windowStart, $windowEnd);
+        // Also check the same window shifted by -1 day (for cross-midnight overlap)
+        $prevWindowStart = $windowStart->copy()->subDay();
+        $prevWindowEnd = $windowEnd->copy()->subDay();
+        if ($now->between($prevWindowStart, $prevWindowEnd)) {
+            return true;
+        }
+
+        return false;
     }
+
 }

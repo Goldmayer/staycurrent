@@ -23,7 +23,7 @@ return [
          * Total threshold for opening a trade.
          * Default: 8
          */
-        'total_threshold' => 6,
+        'total_threshold' => 8,
 
         /*
          * Flat market detection settings.
@@ -34,7 +34,7 @@ return [
              * Number of recent candles to look back for flat detection.
              * Default: 12
              */
-            'lookback_candles' => 12,
+            'lookback_candles' => 8,
 
             /*
              * Percentage threshold for flat detection.
@@ -52,7 +52,7 @@ return [
              * Whether to use the current candle for entry decisions.
              * Default: true
              */
-            'use_current_candle' => true,
+            'use_current_candle' => false,
         ],
 
         /*
@@ -148,11 +148,11 @@ return [
             'dir_flat_threshold_pct' => 0.0001,
             'timeframes' => [
                 '5m'  => ['minutes' => 5,    'points' => 5],
-                '15m' => ['minutes' => 15,   'points' => 12],
-                '30m' => ['minutes' => 30,   'points' => 12],
-                '1h'  => ['minutes' => 60,   'points' => 12],
-                '4h'  => ['minutes' => 240,  'points' => 12],
-                '1d'  => ['minutes' => 1440, 'points' => 12],
+                '15m' => ['minutes' => 15,   'points' => 10],
+                '30m' => ['minutes' => 30,   'points' => 20],
+                '1h'  => ['minutes' => 60,   'points' => 40],
+                '4h'  => ['minutes' => 240,  'points' => 160],
+                '1d'  => ['minutes' => 1440, 'points' => 960],
             ],
         ],
 
@@ -200,5 +200,78 @@ return [
          * Default: 0.0001 (0.01%)
          */
         'percent_per_point' => 0.0001,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | FX Session Scheduling
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for FX session-based quote sync frequency scheduling.
+    |
+    */
+
+    'fx_sessions' => [
+        /*
+         * Timezone for session calculations (default: UTC)
+         */
+        'timezone' => 'UTC',
+
+        /*
+         * Fast interval in minutes when at least one mapped session is active
+         * or when the symbol has open trades
+         */
+        'fast_interval_minutes' => 1,
+
+        /*
+         * Slow interval in minutes when no mapped sessions are active
+         * and no open trades exist
+         */
+        'slow_interval_minutes' => 30,
+
+        /*
+         * Session definitions with per-session warmup and cooldown
+         */
+        'sessions' => [
+            'sydney' => [
+                'start' => '22:00',
+                'end' => '07:00',
+                'warmup_minutes' => 60,
+                'cooldown_minutes' => 120,
+            ],
+            'tokyo' => [
+                'start' => '00:00',
+                'end' => '09:00',
+                'warmup_minutes' => 30,
+                'cooldown_minutes' => 60,
+            ],
+            'london' => [
+                'start' => '08:00',
+                'end' => '17:00',
+                'warmup_minutes' => 60,
+                'cooldown_minutes' => 120,
+            ],
+            'newyork' => [
+                'start' => '13:00',
+                'end' => '22:00',
+                'warmup_minutes' => 60,
+                'cooldown_minutes' => 120,
+            ],
+        ],
+
+        /*
+         * Currency to sessions mapping
+         * Each currency code maps to an array of session names that affect it
+         */
+        'currencies' => [
+            'JPY' => ['tokyo'],
+            'EUR' => ['london'],
+            'GBP' => ['london'],
+            'USD' => ['newyork'],
+            'CAD' => ['newyork'],
+            'AUD' => ['sydney'],
+            'NZD' => ['sydney'],
+            'CHF' => ['london'],
+        ],
     ],
 ];
