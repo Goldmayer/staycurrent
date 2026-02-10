@@ -20,6 +20,7 @@ class ConfigStrategySettingsRepository implements StrategySettingsRepository
             'timeframes' => $timeframes,
             'weights' => $weights,
             'total_threshold' => $config['total_threshold'] ?? 8,
+            'price_windows' => config('trading.strategy.price_windows'),
             'flat' => [
                 'lookback_candles' => $config['flat']['lookback_candles'] ?? 12,
                 'range_pct_threshold' => $config['flat']['range_pct_threshold'] ?? 0.002,

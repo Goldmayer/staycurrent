@@ -4,24 +4,30 @@ namespace App\Services\Trading;
 
 use App\Contracts\StrategySettingsRepository;
 use App\Enums\TradeStatus;
-use App\Models\Candle;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 
 class TradeTickService
 {
-    private const MIN_CANDLES = 50;
-
     public function __construct(
         private readonly TradeDecisionService $decision,
         private readonly StrategySettingsRepository $settings,
     ) {
     }
 
-    public function process(?int $limit = null): array
-    {
+    public function process(
+        ?int $limit = null,
+        ?string $onlySymbol = null,
+        bool $forceOpen = false,
+        ?string $forceSide = null,
+        ?string $forceTimeframe = null,
+    ): array {
         $symbolsQuery = Symbol::query()->where('is_active', true);
+
+        if ($onlySymbol) {
+            $symbolsQuery->where('code', $onlySymbol);
+        }
 
         if ($limit) {
             $symbolsQuery->limit($limit);
@@ -36,14 +42,15 @@ class TradeTickService
         $skipped = [
             'missing_quote' => 0,
             'decision_hold' => 0,
-            'not_enough_candles' => 0,
             'existing_open_trade' => 0,
+            'invalid_point_size' => 0,
+            'invalid_force_params' => 0,
         ];
 
         $risk = $this->settings->get()['risk'] ?? [];
 
-        $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);   // 0.3%
-        $tpPercent = (float) ($risk['take_profit_percent'] ?? 0.0);   // 0.0% (disabled by default)
+        $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);
+        $tpPercent = (float) ($risk['take_profit_percent'] ?? 0.0);
         $maxHoldCfg = (int) ($risk['max_hold_minutes'] ?? 120);
 
         foreach ($symbols as $symbol) {
@@ -59,10 +66,29 @@ class TradeTickService
             }
 
             $entryPrice = (float) $currentPrice;
-
             $quotePulledAt = $this->formatQuotePulledAt($quote);
 
-            $decision = $this->decision->decideOpen($symbol->code);
+            if ($forceOpen) {
+                if (!$forceSide || !$forceTimeframe) {
+                    $tradesSkipped++;
+                    $skipped['invalid_force_params']++;
+                    continue;
+                }
+
+                $decision = [
+                    'action' => 'open',
+                    'side' => $forceSide,
+                    'timeframe_code' => $forceTimeframe,
+                    'reason' => 'forced_open',
+                    'debug' => [
+                        'forced' => true,
+                        'force_side' => $forceSide,
+                        'force_tf' => $forceTimeframe,
+                    ],
+                ];
+            } else {
+                $decision = $this->decision->decideOpen($symbol->code);
+            }
 
             if (($decision['action'] ?? 'hold') !== 'open') {
                 $tradesSkipped++;
@@ -72,19 +98,6 @@ class TradeTickService
 
             $timeframeCode = (string) ($decision['timeframe_code'] ?? '');
             $side = (string) ($decision['side'] ?? '');
-
-            if ($timeframeCode === '' || $side === '') {
-                $tradesSkipped++;
-                $skipped['decision_hold']++;
-                continue;
-            }
-
-            $candleCount = $this->getCandleCount($symbol->code, $timeframeCode);
-            if ($candleCount < self::MIN_CANDLES) {
-                $tradesSkipped++;
-                $skipped['not_enough_candles']++;
-                continue;
-            }
 
             $existingTrade = Trade::query()->where([
                 ['symbol_code', '=', $symbol->code],
@@ -101,11 +114,10 @@ class TradeTickService
             $pointSize = (float) $symbol->point_size;
             if ($pointSize <= 0) {
                 $tradesSkipped++;
-                $skipped['invalid_point_size'] = ($skipped['invalid_point_size'] ?? 0) + 1;
+                $skipped['invalid_point_size']++;
                 continue;
             }
 
-            // Compute points from percents if percent > 0, else fallback to fixed points
             $fallbackSlPoints = (float) ($risk['stop_loss_points'] ?? 20);
             $fallbackTpPoints = (float) ($risk['take_profit_points'] ?? 0);
 
@@ -117,7 +129,6 @@ class TradeTickService
                 ? round(($entryPrice * $tpPercent) / $pointSize, 2)
                 : $fallbackTpPoints;
 
-            // Guards: if computed points <= 0, use fallback
             if ($stopLossPoints <= 0) {
                 $stopLossPoints = $fallbackSlPoints;
             }
@@ -134,7 +145,6 @@ class TradeTickService
                 entryPrice: $entryPrice,
                 quotePulledAt: $quotePulledAt,
                 hash: $hash,
-                candleCount: $candleCount,
                 decision: $decision,
                 stopLossPoints: $stopLossPoints,
                 takeProfitPoints: $takeProfitPoints,
@@ -142,6 +152,7 @@ class TradeTickService
                 pointSize: $pointSize,
                 stopLossPercent: $slPercent,
                 takeProfitPercent: $tpPercent,
+                forced: $forceOpen
             );
 
             $tradesOpened++;
@@ -160,30 +171,11 @@ class TradeTickService
         return SymbolQuote::query()->where('symbol_code', $symbolCode)->first();
     }
 
-    private function getCandleCount(string $symbolCode, string $timeframeCode): int
-    {
-        return Candle::query()
-                     ->where('symbol_code', $symbolCode)
-                     ->where('timeframe_code', $timeframeCode)
-                     ->count();
-    }
-
     private function formatQuotePulledAt(?SymbolQuote $quote): ?string
     {
-        if (!$quote) {
-            return null;
-        }
-
+        if (!$quote) return null;
         $val = $quote->pulled_at ?? $quote->updated_at ?? null;
-        if ($val === null) {
-            return null;
-        }
-
-        if ($val instanceof \DateTimeInterface) {
-            return $val->format('Y-m-d H:i:s');
-        }
-
-        return (string) $val;
+        return $val instanceof \DateTimeInterface ? $val->format('Y-m-d H:i:s') : (string) $val;
     }
 
     private function openTrade(
@@ -193,7 +185,6 @@ class TradeTickService
         float $entryPrice,
         ?string $quotePulledAt,
         int $hash,
-        int $candleCount,
         array $decision,
         float $stopLossPoints,
         float $takeProfitPoints,
@@ -201,6 +192,7 @@ class TradeTickService
         float $pointSize,
         float $stopLossPercent,
         float $takeProfitPercent,
+        bool $forced
     ): void {
         Trade::create([
             'symbol_code' => $symbolCode,
@@ -216,12 +208,11 @@ class TradeTickService
                 'source' => 'trade:tick',
                 'open' => [
                     'source' => 'trade:tick',
+                    'forced' => $forced,
                     'reason' => (string) ($decision['reason'] ?? 'strategy_entry'),
                     'timeframe' => $timeframeCode,
                     'quote_pulled_at' => $quotePulledAt,
                     'hash' => $hash,
-                    'min_candles_required' => self::MIN_CANDLES,
-                    'candles_count_at_open' => $candleCount,
                     'decision' => $decision,
                 ],
                 'risk' => [

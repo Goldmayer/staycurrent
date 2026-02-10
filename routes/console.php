@@ -3,18 +3,18 @@
 use Illuminate\Support\Facades\Schedule;
 
 Schedule::command('market:sync')
-        ->everyFiveMinutes()
+        ->everyMinute()
         ->appendOutputTo(storage_path('logs/schedule-market-sync.log'));
 
 Schedule::command('trade:tick')
-        ->everyFiveMinutes()
+        ->everyMinute()
         ->appendOutputTo(storage_path('logs/schedule-trade-tick.log'));
 
 Schedule::command('trade:close')
-        ->everyFiveMinutes()
+        ->everyMinute()
         ->appendOutputTo(storage_path('logs/schedule-trade-close.log'));
 
 Schedule::command('trading:rebuild-monitors')
-        ->everyFiveMinutes()
+        ->everyMinute()
         ->appendOutputTo(storage_path('logs/schedule-trade-monitors.log'));
 

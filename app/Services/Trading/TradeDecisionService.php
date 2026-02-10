@@ -4,7 +4,7 @@ namespace App\Services\Trading;
 
 use App\Contracts\StrategySettingsRepository;
 use App\Enums\TimeframeCode;
-use App\Models\Candle;
+use App\Services\Trading\PriceWindowService;
 
 class TradeDecisionService
 {
@@ -28,23 +28,44 @@ class TradeDecisionService
         $timeframes = $cfg['timeframes'];
         $weights = $cfg['weights'];
         $threshold = (int) $cfg['total_threshold'];
+        $dirFlatThresholdPct = (float) $cfg['price_windows']['dir_flat_threshold_pct'];
+        $tfConfigs = $cfg['price_windows']['timeframes'];
 
         $dirs = [];
+        $windows = [];
+        $insufficientTicks = [];
         $total = 0;
 
         foreach ($timeframes as $tf) {
-            // IMPORTANT: use LAST CLOSED candle for stability (no unclosed candle noise)
-            $dir = $this->haDirFromLastClosedCandle($symbolCode, (string) $tf);
-
-            if ($dir === null) {
+            $tfConfig = $tfConfigs[$tf] ?? null;
+            if (!$tfConfig) {
                 return [
                     'action' => 'hold',
-                    'reason' => 'not_enough_candles',
+                    'reason' => 'missing_timeframe_config',
                     'debug' => ['missing_tf' => $tf],
                 ];
             }
 
+            $window = (new PriceWindowService())->window(
+                symbolCode: $symbolCode,
+                minutes: $tfConfig['minutes'],
+                points: $tfConfig['points'],
+                dirFlatThresholdPct: $dirFlatThresholdPct
+            );
+
+            $dir = match ($window['dir'] ?? null) {
+                'up' => 'up',
+                'down' => 'down',
+                default => 'flat',
+            };
+
             $dirs[$tf] = $dir;
+            $windows[$tf] = $window;
+
+            // Track insufficient ticks for debug
+            if (($window['current']['count'] ?? 0) < $tfConfig['points']) {
+                $insufficientTicks[] = $tf;
+            }
 
             $sign = $dir === 'up' ? 1 : ($dir === 'down' ? -1 : 0);
             $w = (int) ($weights[$tf] ?? 0);
@@ -59,6 +80,8 @@ class TradeDecisionService
                     'vote_total' => $total,
                     'threshold' => $threshold,
                     'dirs' => $dirs,
+                    'windows' => $windows,
+                    'insufficient_ticks' => $insufficientTicks,
                 ],
             ];
         }
@@ -78,6 +101,8 @@ class TradeDecisionService
                 'debug' => [
                     'vote_total' => $total,
                     'dirs' => $dirs,
+                    'windows' => $windows,
+                    'insufficient_ticks' => $insufficientTicks,
                 ],
             ];
         }
@@ -92,11 +117,11 @@ class TradeDecisionService
             $entry = (string) $pair['entry'];
 
             // Flat filter applies to ENTRY TF (the actual execution timeframe)
-            $isFlat = $this->isFlat(
+            $isFlat = $this->isFlatFromWindow(
                 symbolCode: $symbolCode,
                 tf: $entry,
-                lookback: (int) $cfg['flat']['lookback_candles'],
-                threshold: (float) $cfg['flat']['range_pct_threshold'],
+                tfConfigs: $tfConfigs,
+                dirFlatThresholdPct: $dirFlatThresholdPct,
                 flatDebug: $flatDebug
             );
 
@@ -116,24 +141,30 @@ class TradeDecisionService
                     'dirs' => $dirs,
                     'candidates' => $candidates,
                     'flat' => $flatDebug,
+                    'windows' => $windows,
+                    'insufficient_ticks' => $insufficientTicks,
                 ],
             ];
         }
 
-        // Recompute entry direction for safety (LAST CLOSED candle)
-        $entryDir = $this->haDirFromLastClosedCandle($symbolCode, $entryTf);
-        if ($entryDir === null) {
-            return [
-                'action' => 'hold',
-                'reason' => 'not_enough_candles',
-                'debug' => ['entry_tf' => $entryTf],
-            ];
-        }
+        // Recompute entry direction for safety (window)
+        $entryWindow = (new PriceWindowService())->window(
+            symbolCode: $symbolCode,
+            minutes: $tfConfigs[$entryTf]['minutes'],
+            points: $tfConfigs[$entryTf]['points'],
+            dirFlatThresholdPct: $dirFlatThresholdPct
+        );
+
+        $entryDir = match ($entryWindow['dir'] ?? null) {
+            'up' => 'up',
+            'down' => 'down',
+            default => 'flat',
+        };
 
         if ($entryDir !== $wantedDir) {
             return [
                 'action' => 'hold',
-                'reason' => 'entry_candle_not_in_direction',
+                'reason' => 'entry_not_in_direction',
                 'debug' => [
                     'vote_total' => $total,
                     'side' => $side,
@@ -144,6 +175,8 @@ class TradeDecisionService
                     'entry_dir_recomputed' => $entryDir,
                     'dirs' => $dirs,
                     'candidates' => $candidates,
+                    'windows' => $windows,
+                    'insufficient_ticks' => $insufficientTicks,
                 ],
             ];
         }
@@ -161,6 +194,8 @@ class TradeDecisionService
                 'current_tf' => $currentTf,
                 'entry_tf' => $entryTf,
                 'entry_dir' => $entryDir,
+                'windows' => $windows,
+                'insufficient_ticks' => $insufficientTicks,
             ],
         ];
     }
@@ -177,83 +212,10 @@ class TradeDecisionService
      */
     public function decideArmExitStop(string $side, string $symbolCode, string $tfEntry): array
     {
-        $tfLower = $this->lowerTimeframe($tfEntry);
-        if ($tfLower === null) {
-            return [
-                'action' => 'hold',
-                'reason' => 'no_lower_timeframe',
-                'debug' => ['tf_entry' => $tfEntry],
-            ];
-        }
-
-        $wantedEntryDir = $side === 'buy' ? 'up' : 'down';
-        $wantedLowerDir = $side === 'buy' ? 'down' : 'up';
-
-        // IMPORTANT: use LAST CLOSED candle for stability
-        $entryCurrDir = $this->haDirFromLastClosedCandle($symbolCode, $tfEntry);
-        $lowerCurrDir = $this->haDirFromLastClosedCandle($symbolCode, $tfLower);
-
-        if ($entryCurrDir === null || $lowerCurrDir === null) {
-            return [
-                'action' => 'hold',
-                'reason' => 'not_enough_candles',
-                'debug' => ['tf_entry' => $tfEntry, 'tf_lower' => $tfLower],
-            ];
-        }
-
-        if ($entryCurrDir !== $wantedEntryDir) {
-            return [
-                'action' => 'hold',
-                'reason' => 'entry_not_ok',
-                'debug' => [
-                    'tf_entry' => $tfEntry,
-                    'entry_curr_dir' => $entryCurrDir,
-                ],
-            ];
-        }
-
-        if ($lowerCurrDir !== $wantedLowerDir) {
-            return [
-                'action' => 'hold',
-                'reason' => 'lower_not_against',
-                'debug' => [
-                    'tf_entry' => $tfEntry,
-                    'tf_lower' => $tfLower,
-                    'lower_curr_dir' => $lowerCurrDir,
-                ],
-            ];
-        }
-
-        // Previous CLOSED candle on entry TF (still ok; we need its low/high as a level)
-        $prev = Candle::query()
-                      ->where('symbol_code', $symbolCode)
-                      ->where('timeframe_code', $tfEntry)
-                      ->orderByDesc('open_time_ms')
-                      ->skip(2) // skip current (maybe unclosed) + last closed, take previous closed
-                      ->first();
-
-        if (!$prev) {
-            return [
-                'action' => 'hold',
-                'reason' => 'not_enough_candles_for_stop',
-                'debug' => ['tf_entry' => $tfEntry],
-            ];
-        }
-
-        $stopPrice = $side === 'buy'
-            ? (float) $prev->low
-            : (float) $prev->high;
-
         return [
-            'action' => 'arm_stop',
-            'reason' => 'lower_tf_first_against',
-            'stop_price' => $stopPrice,
-            'tf_entry' => $tfEntry,
-            'tf_lower' => $tfLower,
-            'debug' => [
-                'entry_curr_dir' => $entryCurrDir,
-                'lower_curr_dir' => $lowerCurrDir,
-            ],
+            'action' => 'hold',
+            'reason' => 'price_only_mode',
+            'debug' => ['tf_entry' => $tfEntry],
         ];
     }
 
@@ -333,92 +295,57 @@ class TradeDecisionService
         return false;
     }
 
-    private function isFlat(
+    private function isFlatFromWindow(
         string $symbolCode,
         string $tf,
-        int $lookback,
-        float $threshold,
+        array $tfConfigs,
+        float $dirFlatThresholdPct,
         array &$flatDebug
     ): bool {
-        $candles = Candle::query()
-                         ->where('symbol_code', $symbolCode)
-                         ->where('timeframe_code', $tf)
-                         ->orderByDesc('open_time_ms')
-                         ->limit($lookback)
-                         ->get();
-
-        if ($candles->count() < $lookback) {
-            $flatDebug[$tf] = ['ok' => false, 'reason' => 'not_enough_candles'];
+        $tfConfig = $tfConfigs[$tf] ?? null;
+        if (!$tfConfig) {
+            $flatDebug[$tf] = ['ok' => false, 'reason' => 'missing_tf_config'];
             return true;
         }
 
-        $high = $candles->max(fn (Candle $c) => (float) $c->high);
-        $low = $candles->min(fn (Candle $c) => (float) $c->low);
-        $lastClose = (float) $candles->first()->close;
+        $window = (new PriceWindowService())->window(
+            symbolCode: $symbolCode,
+            minutes: $tfConfig['minutes'],
+            points: $tfConfig['points'],
+            dirFlatThresholdPct: $dirFlatThresholdPct
+        );
 
-        if ($lastClose <= 0) {
-            $flatDebug[$tf] = ['ok' => false, 'reason' => 'bad_last_close'];
+        $current = $window['current'] ?? [];
+        $avg = $current['avg'] ?? null;
+        $range = $current['range'] ?? null;
+        $count = $current['count'] ?? 0;
+        $points = $tfConfig['points'];
+
+        if ($avg === null || $range === null || $count < $points) {
+            $flatDebug[$tf] = [
+                'ok' => false,
+                'reason' => 'insufficient_data',
+                'avg' => $avg,
+                'range' => $range,
+                'count' => $count,
+                'required_points' => $points,
+            ];
             return true;
         }
 
-        $rangePct = ($high - $low) / $lastClose;
+        $rangePct = $range / $avg;
+        $threshold = (float) $this->settings->get()['flat']['range_pct_threshold'];
 
         $flatDebug[$tf] = [
             'ok' => true,
             'range_pct' => $rangePct,
             'threshold' => $threshold,
+            'avg' => $avg,
+            'range' => $range,
+            'count' => $count,
         ];
 
         return $rangePct < $threshold;
-    }
-
-    /**
-     * HA direction for LAST CLOSED candle using minimal classic recursion (prev candle).
-     * We compute HA_Close for both candles, and HA_Open for the current closed candle from prev HA values:
-     *   HA_Open[t] = (HA_Open[t-1] + HA_Close[t-1]) / 2
-     * For seeding HA_Open[t-1] we use (O+C)/2 for prev candle (minimal, stable, no history scan).
-     */
-    private function haDirFromLastClosedCandle(string $symbolCode, string $tf): ?string
-    {
-        $candles = Candle::query()
-                         ->where('symbol_code', $symbolCode)
-                         ->where('timeframe_code', $tf)
-                         ->orderByDesc('open_time_ms')
-                         ->skip(1)   // skip current (possibly unclosed)
-                         ->limit(2)  // take 2 closed: latest closed + previous closed
-                         ->get();
-
-        if ($candles->count() < 2) {
-            return null;
-        }
-
-        /** @var Candle $currClosed */
-        $currClosed = $candles[0];
-        /** @var Candle $prevClosed */
-        $prevClosed = $candles[1];
-
-        return $this->haDirForCandleWithPrev($currClosed, $prevClosed);
-    }
-
-    private function haDirForCandleWithPrev(Candle $curr, Candle $prev): string
-    {
-        $prevHaClose = $this->haCloseFromOhlc($prev);
-        $prevHaOpenSeed = $this->haOpenSeedFromOhlc($prev);
-
-        $haOpen = ($prevHaOpenSeed + $prevHaClose) / 2.0;
-        $haClose = $this->haCloseFromOhlc($curr);
-
-        return $this->haDirection($haOpen, $haClose);
-    }
-
-    private function haCloseFromOhlc(Candle $c): float
-    {
-        return ((float) $c->open + (float) $c->high + (float) $c->low + (float) $c->close) / 4.0;
-    }
-
-    private function haOpenSeedFromOhlc(Candle $c): float
-    {
-        return ((float) $c->open + (float) $c->close) / 2.0;
     }
 
     private function lowerTimeframe(string $tf): ?string
@@ -431,16 +358,5 @@ class TradeDecisionService
             TimeframeCode::M15->value => TimeframeCode::M5->value,
             default => null,
         };
-    }
-
-    private function haDirection(float $haOpen, float $haClose): string
-    {
-        if ($haClose > $haOpen) {
-            return 'up';
-        }
-        if ($haClose < $haOpen) {
-            return 'down';
-        }
-        return 'flat';
     }
 }

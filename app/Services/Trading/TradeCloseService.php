@@ -3,9 +3,7 @@
 namespace App\Services\Trading;
 
 use App\Contracts\StrategySettingsRepository;
-use App\Enums\TimeframeCode;
 use App\Enums\TradeStatus;
-use App\Models\Candle;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
@@ -17,15 +15,16 @@ class TradeCloseService
     private const QUOTE_FRESH_MINUTES = 10;
 
     public function __construct(
-        private readonly StrategySettingsRepository $settings
+        private readonly StrategySettingsRepository $settings,
+        private readonly PriceWindowService $priceWindows,
     ) {
     }
 
     public function process(?int $limit = null): array
     {
         $cfg = $this->settings->get();
-        $trailingCfg = $cfg['risk']['trailing'] ?? [];
 
+        $trailingCfg = $cfg['risk']['trailing'] ?? [];
         $trailingEnabled = (bool) ($trailingCfg['enabled'] ?? false);
 
         $activationPercent = (float) ($trailingCfg['activation_percent'] ?? 0.0);
@@ -33,6 +32,13 @@ class TradeCloseService
 
         $activationPointsFallback = (float) ($trailingCfg['activation_points'] ?? 30);
         $distancePointsFallback = (float) ($trailingCfg['distance_points'] ?? 25);
+
+        // price-only exit config
+        $exitCfg = (array) config('trading.exit', []);
+        $exitFlatThresholdPct = (float) (config('trading.price_windows.dir_flat_threshold_pct', 0.0001));
+
+        $exitReversalMinStrengthPct = (float) ($exitCfg['reversal_min_strength_pct'] ?? 0.00015);
+        $exitArmingMode = (string) ($exitCfg['exit_mode'] ?? 'market'); // market only for now
 
         $query = Trade::query()
                       ->where('status', TradeStatus::OPEN->value)
@@ -74,7 +80,11 @@ class TradeCloseService
                 $activationPercent,
                 $distancePercent,
                 $activationPointsFallback,
-                $distancePointsFallback
+                $distancePointsFallback,
+                $exitFlatThresholdPct,
+                $exitReversalMinStrengthPct,
+                $exitArmingMode,
+                $cfg
             ) {
                 /** @var Trade|null $trade */
                 $trade = Trade::query()
@@ -204,7 +214,7 @@ class TradeCloseService
                 }
 
                 // ------------------------------------------------------------
-                // 1) EXIT STOP (close on hit) - execute at level
+                // 1) EXIT STOP (close on hit) - execute at LEVEL
                 // ------------------------------------------------------------
                 $exitStop = $meta['exit_stop'] ?? null;
                 if (is_array($exitStop) && isset($exitStop['stop_price'])) {
@@ -255,7 +265,7 @@ class TradeCloseService
                 }
 
                 // ------------------------------------------------------------
-                // 2) HARD EXITS (SL/TP/Time) with execution at LEVEL
+                // 2) HARD EXITS (SL/TP/Time)
                 // ------------------------------------------------------------
                 $hard = $this->detectHardExit($trade, $priceNow, $pointSize);
 
@@ -304,7 +314,7 @@ class TradeCloseService
                 }
 
                 // ------------------------------------------------------------
-                // 3) STRATEGY EXIT LOGIC: HA reversal -> arm/move exit_stop
+                // 3) PRICE-ONLY STRATEGY EXIT: window reversal (NO candles)
                 // ------------------------------------------------------------
                 $tradeTf = (string) $trade->timeframe_code;
                 $exitTf = $this->lowerTimeframe($tradeTf);
@@ -314,101 +324,86 @@ class TradeCloseService
                     return;
                 }
 
-                $exitDir = $this->haDirFromCurrentCandle($trade->symbol_code, $exitTf);
-                if ($exitDir === null) {
+                $tfCfg = (array) (config("trading.price_windows.timeframes.{$exitTf}") ?? []);
+                $minutes = (int) ($tfCfg['minutes'] ?? 0);
+                $points = (int) ($tfCfg['points'] ?? 0);
+
+                if ($minutes <= 0 || $points <= 0) {
                     $held++;
                     return;
                 }
 
-                $wantedExitDir = ((string) $trade->side === 'buy') ? 'up' : 'down';
-                $isAgainst = ($exitDir !== 'flat') && ($exitDir !== $wantedExitDir);
+                $w = $this->priceWindows->window(
+                    symbolCode: (string) $trade->symbol_code,
+                    minutes: $minutes,
+                    points: $points,
+                    dirFlatThresholdPct: $exitFlatThresholdPct
+                );
 
-                if (!$isAgainst) {
+                $curr = (array) ($w['current'] ?? []);
+                $prev = (array) ($w['previous'] ?? []);
+
+                $currOk = (bool) ($curr['is_complete'] ?? false);
+                $prevOk = (bool) ($prev['is_complete'] ?? false);
+
+                if (!$currOk || !$prevOk) {
                     $held++;
                     return;
                 }
 
-                $prevTradeCandle = Candle::query()
-                                         ->where('symbol_code', $trade->symbol_code)
-                                         ->where('timeframe_code', $tradeTf)
-                                         ->orderByDesc('open_time_ms')
-                                         ->skip(1)
-                                         ->first();
+                $dir = (string) ($w['dir'] ?? 'no_data');
+                $dirPct = isset($w['dir_pct']) ? (float) $w['dir_pct'] : null;
 
-                if (!$prevTradeCandle) {
-                    $held++;
-                    return;
-                }
+                $against = $trade->isLong()
+                    ? ($dir === 'down')
+                    : ($dir === 'up');
 
-                $minPoints = $this->slPoints($trade);
+                $strongEnough = $dirPct !== null && $dirPct >= $exitReversalMinStrengthPct;
 
-                $side = (string) $trade->side;
-                $currentStop = null;
-                if (isset($meta['exit_stop']) && is_array($meta['exit_stop']) && isset($meta['exit_stop']['stop_price'])) {
-                    $currentStop = (float) $meta['exit_stop']['stop_price'];
-                }
+                if ($against && $strongEnough) {
+                    // Close immediately at market (current quote)
+                    $exitPrice = $priceNow;
 
-                if ($side === 'buy') {
-                    $candleLevel = (float) $prevTradeCandle->low;
+                    $realizedPoints = $this->pointsFromPrices(
+                        entryPrice: (float) $trade->entry_price,
+                        exitPrice: $exitPrice,
+                        pointSize: $pointSize,
+                        side: (string) $trade->side
+                    );
 
-                    $minDist = $minPoints * $pointSize;
-                    $maxAllowed = $priceNow - $minDist;
-                    $candidate = min($candleLevel, $maxAllowed);
+                    $riskPoints = $this->slPoints($trade);
+                    $rMultiple = $riskPoints > 0 ? round($realizedPoints / $riskPoints, 2) : null;
 
-                    $shouldMove = $currentStop === null ? true : ($candidate > $currentStop);
-
-                    if ($shouldMove) {
-                        $meta['exit_stop'] = [
-                            'armed_at' => now()->toDateTimeString(),
-                            'reason' => 'exit_signal_ha_exit_tf_turned_down',
-                            'stop_price' => $candidate,
-                            'trade_tf' => $tradeTf,
-                            'exit_tf' => $exitTf,
-                            'min_distance_points' => $minPoints,
-                            'min_distance_price' => $minDist,
-                            'price_now_at_arm' => $priceNow,
-                            'candle_level' => $candleLevel,
-                            'clamped_by_min_distance' => ($candidate !== $candleLevel),
-                            'previous_stop_price' => $currentStop,
-                        ];
-
-                        $trade->meta = $meta;
-                        $trade->save();
-
-                        $exitStopMoved++;
-                    }
-
-                    $held++;
-                    return;
-                }
-
-                $candleLevel = (float) $prevTradeCandle->high;
-
-                $minDist = $minPoints * $pointSize;
-                $minAllowed = $priceNow + $minDist;
-                $candidate = max($candleLevel, $minAllowed);
-
-                $shouldMove = $currentStop === null ? true : ($candidate < $currentStop);
-
-                if ($shouldMove) {
-                    $meta['exit_stop'] = [
-                        'armed_at' => now()->toDateTimeString(),
-                        'reason' => 'exit_signal_ha_exit_tf_turned_up',
-                        'stop_price' => $candidate,
+                    $meta['close'] = [
+                        'source' => 'trade:close',
+                        'reason' => 'price_window_reversal',
+                        'quote_pulled_at' => $mostRecentTimestamp->toDateTimeString(),
                         'trade_tf' => $tradeTf,
                         'exit_tf' => $exitTf,
-                        'min_distance_points' => $minPoints,
-                        'min_distance_price' => $minDist,
-                        'price_now_at_arm' => $priceNow,
-                        'candle_level' => $candleLevel,
-                        'clamped_by_min_distance' => ($candidate !== $candleLevel),
-                        'previous_stop_price' => $currentStop,
+                        'exit_price_mode' => $exitArmingMode,
+                        'price_now' => $priceNow,
+                        'unrealized_points_at_close' => $unrealizedPoints,
+                        'r_multiple' => $rMultiple,
+                        'window' => $w,
+                        'thresholds' => [
+                            'flat_threshold_pct' => $exitFlatThresholdPct,
+                            'reversal_min_strength_pct' => $exitReversalMinStrengthPct,
+                        ],
+                        'strategy_cfg' => [
+                            'risk' => $cfg['risk'] ?? null,
+                        ],
                     ];
 
+                    $trade->status = TradeStatus::CLOSED;
+                    $trade->closed_at = now();
+                    $trade->exit_price = $exitPrice;
+                    $trade->realized_points = $realizedPoints;
+                    $trade->unrealized_points = 0;
                     $trade->meta = $meta;
                     $trade->save();
 
-                    $exitStopMoved++;
+                    $closed++;
+                    return;
                 }
 
                 $held++;
@@ -424,21 +419,50 @@ class TradeCloseService
             'skipped_missing_symbol' => $skippedMissingSymbol,
             'skipped_not_enough_candles' => 0,
             'skipped_no_reversal' => 0,
-            'exit_stop_armed' => $exitStopMoved,
+            'exit_stop_moved' => $exitStopMoved,
             'exit_stop_hit' => $exitStopHit,
         ];
     }
 
     private function mostRecentQuoteTimestamp(SymbolQuote $quote): ?Carbon
     {
-        $pulledAt = $quote->pulled_at ? Carbon::parse($quote->pulled_at) : null;
-        $updatedAt = $quote->updated_at ? Carbon::parse($quote->updated_at) : null;
-
-        if ($pulledAt && $updatedAt) {
-            return $pulledAt->max($updatedAt);
+        if ($quote->pulled_at instanceof Carbon) {
+            return $quote->pulled_at;
         }
 
-        return $pulledAt ?: $updatedAt;
+        if ($quote->pulled_at) {
+            return Carbon::parse($quote->pulled_at);
+        }
+
+        return null;
+    }
+
+    private function pointsFromPrices(float $entryPrice, float $exitPrice, float $pointSize, string $side): float
+    {
+        if ($pointSize <= 0) {
+            return 0.0;
+        }
+
+        $diff = ($side === 'buy')
+            ? ($exitPrice - $entryPrice)
+            : ($entryPrice - $exitPrice);
+
+        return round($diff / $pointSize, 2);
+    }
+
+    private function slPoints(Trade $trade): float
+    {
+        return (float) ($trade->stop_loss_points ?? 0);
+    }
+
+    private function tpPoints(Trade $trade): float
+    {
+        return (float) ($trade->take_profit_points ?? 0);
+    }
+
+    private function maxHoldMinutes(Trade $trade): int
+    {
+        return (int) ($trade->max_hold_minutes ?? 0);
     }
 
     /**
@@ -446,22 +470,28 @@ class TradeCloseService
      */
     private function detectHardExit(Trade $trade, float $priceNow, float $pointSize): ?array
     {
-        $sl = $this->slPoints($trade);
-        $tp = $this->tpPoints($trade);
-        $maxHold = $this->maxHoldMinutes($trade);
-
-        $side = (string) $trade->side;
         $entry = (float) $trade->entry_price;
+        $side = (string) $trade->side;
 
-        if ($trade->opened_at && now()->diffInMinutes($trade->opened_at) >= $maxHold) {
-            return [
-                'reason' => 'time_stop',
-                'exit_price' => $priceNow,
-                'exit_price_mode' => 'market',
-                'exit_price_level' => $priceNow,
-            ];
+        // Time stop (market)
+        $maxHold = $this->maxHoldMinutes($trade);
+        if ($maxHold > 0 && $trade->opened_at) {
+            $age = now()->diffInMinutes($trade->opened_at);
+            if ($age >= $maxHold) {
+                return [
+                    'reason' => 'time_exit',
+                    'exit_price' => $priceNow,
+                    'exit_price_mode' => 'market',
+                    'exit_price_level' => $priceNow,
+                ];
+            }
         }
 
+        if ($pointSize <= 0) {
+            return null;
+        }
+
+        $sl = $this->slPoints($trade);
         if ($sl > 0) {
             $slPrice = $side === 'buy'
                 ? ($entry - ($sl * $pointSize))
@@ -473,7 +503,7 @@ class TradeCloseService
 
             if ($hit) {
                 return [
-                    'reason' => 'stop_loss_hit',
+                    'reason' => 'stop_loss',
                     'exit_price' => $slPrice,
                     'exit_price_mode' => 'level',
                     'exit_price_level' => $slPrice,
@@ -481,6 +511,7 @@ class TradeCloseService
             }
         }
 
+        $tp = $this->tpPoints($trade);
         if ($tp > 0) {
             $tpPrice = $side === 'buy'
                 ? ($entry + ($tp * $pointSize))
@@ -492,7 +523,7 @@ class TradeCloseService
 
             if ($hit) {
                 return [
-                    'reason' => 'take_profit_hit',
+                    'reason' => 'take_profit',
                     'exit_price' => $tpPrice,
                     'exit_price_mode' => 'level',
                     'exit_price_level' => $tpPrice,
@@ -503,67 +534,17 @@ class TradeCloseService
         return null;
     }
 
-    private function slPoints(Trade $trade): float
+    private function lowerTimeframe(string $tradeTf): ?string
     {
-        $v = (float) ($trade->stop_loss_points ?? 0);
-        return max(0.0, $v);
-    }
+        // Desc -> Asc: pick next faster TF
+        $order = ['1d', '4h', '1h', '30m', '15m', '5m'];
 
-    private function tpPoints(Trade $trade): float
-    {
-        $v = (float) ($trade->take_profit_points ?? 0);
-        return max(0.0, $v);
-    }
-
-    private function maxHoldMinutes(Trade $trade): int
-    {
-        $v = (int) ($trade->max_hold_minutes ?? 0);
-        return $v > 0 ? $v : 120;
-    }
-
-    private function pointsFromPrices(float $entryPrice, float $exitPrice, float $pointSize, string $side): float
-    {
-        $raw = ($side === 'buy')
-            ? (($exitPrice - $entryPrice) / $pointSize)
-            : (($entryPrice - $exitPrice) / $pointSize);
-
-        return round($raw, 2);
-    }
-
-    private function lowerTimeframe(string $tf): ?string
-    {
-        return match ($tf) {
-            TimeframeCode::D1->value => TimeframeCode::H4->value,
-            TimeframeCode::H4->value => TimeframeCode::H1->value,
-            TimeframeCode::H1->value => TimeframeCode::M30->value,
-            TimeframeCode::M30->value => TimeframeCode::M15->value,
-            TimeframeCode::M15->value => TimeframeCode::M5->value,
-            default => null,
-        };
-    }
-
-    private function haDirFromCurrentCandle(string $symbolCode, string $tf): ?string
-    {
-        $candle = Candle::query()
-                        ->where('symbol_code', $symbolCode)
-                        ->where('timeframe_code', $tf)
-                        ->orderByDesc('open_time_ms')
-                        ->first();
-
-        if (!$candle) {
+        $i = array_search($tradeTf, $order, true);
+        if ($i === false) {
             return null;
         }
 
-        $haClose = ((float) $candle->open + (float) $candle->high + (float) $candle->low + (float) $candle->close) / 4.0;
-        $haOpen = ((float) $candle->open + (float) $candle->close) / 2.0;
-
-        if ($haClose > $haOpen) {
-            return 'up';
-        }
-        if ($haClose < $haOpen) {
-            return 'down';
-        }
-
-        return 'flat';
+        $next = $order[$i + 1] ?? null;
+        return is_string($next) ? $next : null;
     }
 }

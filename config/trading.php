@@ -143,7 +143,40 @@ return [
                 'distance_percent' => 0.0015,
             ],
         ],
+
+        'price_windows' => [
+            'dir_flat_threshold_pct' => 0.0001,
+            'timeframes' => [
+                '5m'  => ['minutes' => 5,    'points' => 5],
+                '15m' => ['minutes' => 15,   'points' => 12],
+                '30m' => ['minutes' => 30,   'points' => 12],
+                '1h'  => ['minutes' => 60,   'points' => 12],
+                '4h'  => ['minutes' => 240,  'points' => 12],
+                '1d'  => ['minutes' => 1440, 'points' => 12],
+            ],
+        ],
+
+        'exit' => [
+            // quote freshness guard
+            'quote_max_age_seconds' => 120,
+
+            // hard stop from entry
+            'hard_stop_pct' => 0.0020, // 0.20%
+
+            // reversal detection via PriceWindowService
+            'tfs' => ['5m', '15m', '30m'],
+            'reversal_min_against_count' => 2,
+            'reversal_min_strength_pct' => 0.00015,
+
+            // trailing stop based on best_price stored in trade.meta
+            'trailing_pct' => 0.0015, // 0.15%
+            'min_profit_to_trail_pct' => 0.0005, // 0.05%
+        ],
+
+
     ],
+
+
 
     /*
     |--------------------------------------------------------------------------

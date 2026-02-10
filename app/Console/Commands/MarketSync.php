@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Symbol;
 use App\Services\MarketData\MarketDataSyncService;
 use Illuminate\Console\Command;
 
@@ -13,61 +14,52 @@ class MarketSync extends Command
                             {--only-candles : Sync only candles, skip quotes}
                             {--limit=200 : Limit for kline data}';
 
-    protected $description = 'Sync market data from Binance';
+    protected $description = 'Sync market data (price-only)';
 
     public function handle(MarketDataSyncService $syncService): int
     {
         $symbolCode = $this->option('symbol');
-        $onlyQuotes = $this->option('only-quotes');
-        $onlyCandles = $this->option('only-candles');
-        $limit = (int) $this->option('limit');
+        $onlyCandles = (bool) $this->option('only-candles');
+
+        if ($onlyCandles) {
+            $this->info('Candles syncing is disabled in price-only mode.');
+            return 0;
+        }
 
         if ($symbolCode) {
-            $this->syncSingleSymbol($syncService, $symbolCode, $onlyQuotes, $onlyCandles, $limit);
-        } else {
-            $this->syncAllSymbols($syncService, $onlyQuotes, $onlyCandles, $limit);
+            $this->syncSingleSymbol($syncService, $symbolCode);
+            return 0;
         }
+
+        $this->syncAllSymbols($syncService);
 
         return 0;
     }
 
-    private function syncSingleSymbol(MarketDataSyncService $syncService, string $symbolCode, bool $onlyQuotes, bool $onlyCandles, int $limit): void
+    private function syncSingleSymbol(MarketDataSyncService $syncService, string $symbolCode): void
     {
         $this->info("Syncing symbol: {$symbolCode}");
 
-        if (!$onlyCandles) {
-            $syncService->syncSymbolQuote($symbolCode);
-            $this->info("  ✓ Quotes synced");
-        }
+        $syncService->syncSymbolQuote($symbolCode);
 
-        if (!$onlyQuotes) {
-            $syncService->syncSymbolCandles($symbolCode, $limit);
-            $this->info("  ✓ Candles synced");
-        }
+        $this->info('  ✓ Quotes synced');
     }
 
-    private function syncAllSymbols(MarketDataSyncService $syncService, bool $onlyQuotes, bool $onlyCandles, int $limit): void
+    private function syncAllSymbols(MarketDataSyncService $syncService): void
     {
-        $symbols = \App\Models\Symbol::where('is_active', true)
-            ->orderBy('sort')
-            ->orderBy('code')
-            ->get();
+        $symbols = Symbol::query()
+                         ->where('is_active', true)
+                         ->orderBy('sort')
+                         ->orderBy('code')
+                         ->pluck('code')
+                         ->all();
 
-        $this->info("Syncing {$symbols->count()} active symbols...");
+        $this->info('Syncing ' . count($symbols) . ' active symbols...');
 
-        if (!$onlyCandles) {
-            // Use batch quotes for all symbols (FX symbols will use batch provider, others will use individual)
-            $symbolCodes = $symbols->pluck('code')->toArray();
-            $syncService->syncFxQuotes($symbolCodes);
-            $this->info("  ✓ Quotes synced (batch)");
+        foreach ($symbols as $code) {
+            $syncService->syncSymbolQuote($code);
         }
 
-        if (!$onlyQuotes) {
-            foreach ($symbols as $symbol) {
-                $this->line("{$symbol->code}:");
-                $syncService->syncSymbolCandles($symbol->code, $limit);
-                $this->info("  ✓ Candles synced");
-            }
-        }
+        $this->info('  ✓ Quotes synced');
     }
 }
