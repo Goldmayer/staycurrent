@@ -1,5 +1,5 @@
 <div>
-    <h3 class="text-lg font-semibold mb-4">Waiting trades (no open trade)</h3>
+    <h3 class="text-lg font-semibold mb-4">Waiting trades</h3>
 
 {{--    <div class="mb-4 p-3 bg-gray-100 dark:bg-gray-800 rounded">
         <p class="text-sm text-gray-600 dark:text-gray-300">Debug: TradeMonitor count: {{ $this->debug_total_records }}</p>

@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Symbol;
 use App\Services\MarketData\MarketDataSyncService;
 use App\Services\Trading\FxSessionScheduler;
+use App\Services\Trading\TradeTickService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 
@@ -21,6 +22,7 @@ class MarketSync extends Command
     public function __construct(
         private readonly FxSessionScheduler $scheduler,
         private readonly MarketDataSyncService $syncService,
+        private readonly TradeTickService $tradeTickService,
     ) {
         parent::__construct();
     }
@@ -47,9 +49,21 @@ class MarketSync extends Command
 
     private function syncSingleSymbol(string $symbolCode): void
     {
+        $symbolCode = strtoupper(trim($symbolCode));
+
         $this->info("Syncing symbol: {$symbolCode}");
 
-        $this->syncService->syncSymbolQuote($symbolCode);
+        $ok = $this->syncService->syncSymbolQuote($symbolCode);
+
+        // ✅ Один вызов, даже для одного символа (batch API)
+        if ($ok) {
+            $this->tradeTickService->processSymbols(
+                symbolCodes: [$symbolCode],
+                forceOpen: false,
+                forceSide: null,
+                forceTimeframe: null,
+            );
+        }
 
         $this->info('  ✓ Quotes synced');
     }
@@ -81,7 +95,16 @@ class MarketSync extends Command
 
         $now = Carbon::now();
 
+        /** @var array<int, string> $updatedSymbols */
+        $updatedSymbols = [];
+
         foreach ($symbols as $code) {
+            $code = strtoupper(trim((string) $code));
+            if ($code === '') {
+                $skipped++;
+                continue;
+            }
+
             $hasOpenTrade = isset($openTradeSymbols[$code]);
             $lastQuote = $lastQuotes[$code] ?? null;
             $lastPulledAt = $lastQuote?->pulled_at ?? $lastQuote?->updated_at;
@@ -89,11 +112,26 @@ class MarketSync extends Command
             $interval = $this->scheduler->syncIntervalMinutes($code, $now, $hasOpenTrade);
 
             if ($this->scheduler->isQuoteDue($lastPulledAt, $interval, $now)) {
-                $this->syncService->syncSymbolQuote($code);
+                $ok = $this->syncService->syncSymbolQuote($code);
+                if ($ok) {
+                    $updatedSymbols[] = $code;
+                }
                 $synced++;
             } else {
                 $skipped++;
             }
+        }
+
+        // ✅ ОДИН вызов торгового тика по всем обновлённым символам
+        $updatedSymbols = array_values(array_unique($updatedSymbols));
+
+        if ($updatedSymbols !== []) {
+            $this->tradeTickService->processSymbols(
+                symbolCodes: $updatedSymbols,
+                forceOpen: false,
+                forceSide: null,
+                forceTimeframe: null,
+            );
         }
 
         $this->info("  ✓ Quotes synced: {$synced}, skipped: {$skipped}");

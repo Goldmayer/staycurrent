@@ -49,6 +49,7 @@ class TradesWaiting extends Component implements HasActions, HasForms, HasTable
                              ->whereNull('open_trade_id')
                              ->whereIn('timeframe_code', $activeTimeframes)
                              ->whereIn('symbol_code', $activeSymbols)
+                             ->where('expectation', 'like', 'WAIT:%')
                              ->with('openTrade');
 
         $this->debug_table_records_count = (clone $query)->count();
@@ -165,6 +166,7 @@ class TradesWaiting extends Component implements HasActions, HasForms, HasTable
                           ->getStateUsing(fn (TradeMonitor $record) => (string) ($record->expectation ?? '—'))
                           ->wrap()
                           ->color(fn (?string $state): string => match (true) {
+                              is_string($state) && str_starts_with($state, 'WAIT:') => 'warning',
                               is_string($state) && str_starts_with($state, 'OK:') => 'success',
                               is_string($state) && str_starts_with($state, 'Exit:') => 'danger',
                               default => 'gray',

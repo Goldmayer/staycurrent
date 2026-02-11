@@ -7,6 +7,7 @@ use App\Enums\TradeStatus;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
+use App\Models\TradeMonitor;
 
 class TradeTickService
 {
@@ -34,7 +35,29 @@ class TradeTickService
             $symbolsQuery->limit($limit);
         }
 
-        $symbols = $symbolsQuery->get();
+        $symbols = $symbolsQuery->pluck('code')->all();
+
+        return $this->processSymbols(
+            symbolCodes: $symbols,
+            forceOpen: $forceOpen,
+            forceSide: $forceSide,
+            forceTimeframe: $forceTimeframe,
+        );
+    }
+
+    /**
+     * @param array<int, string> $symbolCodes
+     */
+    public function processSymbols(
+        array $symbolCodes,
+        bool $forceOpen = false,
+        ?string $forceSide = null,
+        ?string $forceTimeframe = null,
+    ): array {
+        $symbolCodes = array_values(array_unique(array_filter(array_map(
+            fn ($s) => strtoupper(trim((string) $s)),
+            $symbolCodes
+        ), fn ($s) => $s !== '')));
 
         $symbolsProcessed = 0;
         $tradesOpened = 0;
@@ -49,6 +72,50 @@ class TradeTickService
             'session_closed' => 0,
         ];
 
+        if ($symbolCodes === []) {
+            return [
+                'symbols_processed' => 0,
+                'trades_opened' => 0,
+                'trades_skipped' => 0,
+                'skipped' => $skipped,
+            ];
+        }
+
+        $symbols = Symbol::query()
+                         ->where('is_active', true)
+                         ->whereIn('code', $symbolCodes)
+                         ->get();
+
+        if ($symbols->isEmpty()) {
+            return [
+                'symbols_processed' => 0,
+                'trades_opened' => 0,
+                'trades_skipped' => 0,
+                'skipped' => $skipped,
+            ];
+        }
+
+        $symbolList = $symbols->pluck('code')->all();
+
+        $quotes = SymbolQuote::query()
+                             ->whereIn('symbol_code', $symbolList)
+                             ->get()
+                             ->keyBy('symbol_code');
+
+        $openTrades = Trade::query()
+                           ->whereIn('symbol_code', $symbolList)
+                           ->where('status', TradeStatus::OPEN->value)
+                           ->get(['id', 'symbol_code', 'timeframe_code']);
+
+        $openTradeSet = [];
+        $hasAnyOpenTradeBySymbol = [];
+
+        foreach ($openTrades as $t) {
+            $k = (string) $t->symbol_code . '|' . (string) $t->timeframe_code;
+            $openTradeSet[$k] = (int) $t->id;
+            $hasAnyOpenTradeBySymbol[(string) $t->symbol_code] = true;
+        }
+
         $risk = $this->settings->get()['risk'] ?? [];
 
         $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);
@@ -58,7 +125,7 @@ class TradeTickService
         foreach ($symbols as $symbol) {
             $symbolsProcessed++;
 
-            $quote = $this->getQuote($symbol->code);
+            $quote = $quotes[$symbol->code] ?? null;
             $currentPrice = $quote?->price;
 
             if (!$currentPrice) {
@@ -92,6 +159,12 @@ class TradeTickService
                 $decision = $this->decision->decideOpen($symbol->code);
             }
 
+            // ✅ Persist WAIT:* monitors for symbols even if they have open trades on OTHER TFs.
+            // This only touches open_trade_id IS NULL rows, so it won't overwrite "open trade" monitors.
+            if (!$forceOpen) {
+                $this->persistWaitingMonitorsFromDecision($symbol->code, $decision);
+            }
+
             // Check if we're in a trading window for new entries
             if (!$forceOpen && !$this->fxSessionScheduler->isInTradingWindow($symbol->code, now())) {
                 $tradesSkipped++;
@@ -108,13 +181,8 @@ class TradeTickService
             $timeframeCode = (string) ($decision['timeframe_code'] ?? '');
             $side = (string) ($decision['side'] ?? '');
 
-            $existingTrade = Trade::query()->where([
-                ['symbol_code', '=', $symbol->code],
-                ['timeframe_code', '=', $timeframeCode],
-                ['status', '=', TradeStatus::OPEN->value],
-            ])->first();
-
-            if ($existingTrade) {
+            $openKey = $symbol->code . '|' . $timeframeCode;
+            if (isset($openTradeSet[$openKey])) {
                 $tradesSkipped++;
                 $skipped['existing_open_trade']++;
                 continue;
@@ -147,7 +215,7 @@ class TradeTickService
 
             $hash = crc32($symbol->code . '|' . $timeframeCode . '|' . $side);
 
-            $this->openTrade(
+            $tradeId = $this->openTrade(
                 symbolCode: $symbol->code,
                 timeframeCode: $timeframeCode,
                 side: $side,
@@ -164,6 +232,15 @@ class TradeTickService
                 forced: $forceOpen
             );
 
+            // ✅ If we opened trade on TF, ensure any WAIT:* monitor for that TF is cleared (open_trade_id is NULL monitors)
+            if (!$forceOpen) {
+                $this->clearWaitingMonitorForSymbolTf($symbol->code, $timeframeCode);
+            }
+
+            // update sets to prevent duplicates within same batch run
+            $openTradeSet[$openKey] = $tradeId;
+            $hasAnyOpenTradeBySymbol[$symbol->code] = true;
+
             $tradesOpened++;
         }
 
@@ -175,16 +252,83 @@ class TradeTickService
         ];
     }
 
-    private function getQuote(string $symbolCode): ?SymbolQuote
-    {
-        return SymbolQuote::query()->where('symbol_code', $symbolCode)->first();
-    }
-
     private function formatQuotePulledAt(?SymbolQuote $quote): ?string
     {
         if (!$quote) return null;
         $val = $quote->pulled_at ?? $quote->updated_at ?? null;
         return $val instanceof \DateTimeInterface ? $val->format('Y-m-d H:i:s') : (string) $val;
+    }
+
+    /**
+     * Persist WAIT:* statuses for "waiting_lower_reversal" (open_trade_id must stay NULL).
+     * Also clears stale WAIT:* statuses for this symbol when waiting is no longer present.
+     */
+    private function persistWaitingMonitorsFromDecision(string $symbolCode, array $decision): void
+    {
+        $reason = (string) ($decision['reason'] ?? '');
+        $debug = (array) ($decision['debug'] ?? []);
+        $waiting = (array) ($debug['waiting_entries'] ?? []);
+
+        if ($reason !== 'waiting_lower_reversal' || $waiting === []) {
+            // Clear only WAIT:* (do not touch other statuses)
+            TradeMonitor::query()
+                        ->where('symbol_code', $symbolCode)
+                        ->whereNull('open_trade_id')
+                        ->where('expectation', 'like', 'WAIT:%')
+                        ->update(['expectation' => null]);
+
+            return;
+        }
+
+        $waitingTfs = [];
+
+        foreach ($waiting as $w) {
+            $entryTf = (string) ($w['entry_tf'] ?? '');
+            if ($entryTf === '') {
+                continue;
+            }
+
+            $waitingTfs[] = $entryTf;
+
+            $wanted = strtoupper((string) ($w['wanted_dir'] ?? ''));
+            $lowerNow = strtoupper((string) ($w['lower_dir_now'] ?? ''));
+            $lowerTf = (string) ($w['lower_tf'] ?? '');
+            $req = (string) ($w['required_seniors'] ?? '');
+            $cnt = (string) ($w['seniors_in_dir_count'] ?? '');
+
+            $expectation = "WAIT: entry={$entryTf} lower={$lowerTf} want={$wanted} lower_now={$lowerNow} seniors={$cnt}/{$req}";
+
+            TradeMonitor::updateOrCreate(
+                [
+                    'symbol_code' => $symbolCode,
+                    'timeframe_code' => $entryTf,
+                ],
+                [
+                    'open_trade_id' => null,
+                    'expectation' => $expectation,
+                ]
+            );
+        }
+
+        $waitingTfs = array_values(array_unique(array_filter($waitingTfs, fn ($x) => is_string($x) && $x !== '')));
+
+        // Clear stale WAIT:* rows for this symbol not in current waiting list
+        TradeMonitor::query()
+                    ->where('symbol_code', $symbolCode)
+                    ->whereNull('open_trade_id')
+                    ->where('expectation', 'like', 'WAIT:%')
+                    ->when($waitingTfs !== [], fn ($q) => $q->whereNotIn('timeframe_code', $waitingTfs))
+                    ->update(['expectation' => null]);
+    }
+
+    private function clearWaitingMonitorForSymbolTf(string $symbolCode, string $timeframeCode): void
+    {
+        TradeMonitor::query()
+                    ->where('symbol_code', $symbolCode)
+                    ->where('timeframe_code', $timeframeCode)
+                    ->whereNull('open_trade_id')
+                    ->where('expectation', 'like', 'WAIT:%')
+                    ->update(['expectation' => null]);
     }
 
     private function openTrade(
@@ -202,8 +346,8 @@ class TradeTickService
         float $stopLossPercent,
         float $takeProfitPercent,
         bool $forced
-    ): void {
-        Trade::create([
+    ): int {
+        $trade = Trade::create([
             'symbol_code' => $symbolCode,
             'timeframe_code' => $timeframeCode,
             'side' => $side,
@@ -234,5 +378,7 @@ class TradeTickService
                 ],
             ],
         ]);
+
+        return (int) $trade->id;
     }
 }

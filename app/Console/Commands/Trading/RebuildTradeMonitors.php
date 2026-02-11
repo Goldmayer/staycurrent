@@ -112,10 +112,32 @@ class RebuildTradeMonitors extends Command
     protected function computeExpectationForNoTrade(array $decision, string $rowTimeframe): string
     {
         $action = (string) ($decision['action'] ?? 'hold');
+        $reason = (string) ($decision['reason'] ?? '');
+        $debug = (array) ($decision['debug'] ?? []);
+
+        // ✅ Persist the "WAIT:*" expectation for waiting_lower_reversal per-row timeframe
+        if ($reason === 'waiting_lower_reversal') {
+            $waiting = (array) ($debug['waiting_entries'] ?? []);
+
+            foreach ($waiting as $w) {
+                $entryTf = (string) ($w['entry_tf'] ?? '');
+                if ($entryTf === '' || $entryTf !== $rowTimeframe) {
+                    continue;
+                }
+
+                $wanted = strtoupper((string) ($w['wanted_dir'] ?? ''));
+                $lowerNow = strtoupper((string) ($w['lower_dir_now'] ?? ''));
+                $lowerTf = (string) ($w['lower_tf'] ?? '');
+                $req = (string) ($w['required_seniors'] ?? '');
+                $cnt = (string) ($w['seniors_in_dir_count'] ?? '');
+
+                return "WAIT: entry={$entryTf} lower={$lowerTf} want={$wanted} lower_now={$lowerNow} seniors={$cnt}/{$req}";
+            }
+
+            return "No entry on {$rowTimeframe}";
+        }
 
         if ($action !== 'open') {
-            $reason = (string) ($decision['reason'] ?? '');
-
             return match ($reason) {
                 'no_edge' => 'No entry: no edge',
                 'not_enough_candles' => 'No entry: not enough candles',

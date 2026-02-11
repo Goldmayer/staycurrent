@@ -21,7 +21,7 @@ class MarketDataSyncService
         $this->syncSymbolQuote($symbolCode);
     }
 
-    public function syncSymbolQuote(string $symbolCode): void
+    public function syncSymbolQuote(string $symbolCode): bool
     {
         try {
             $price = $this->provider->lastPrice($symbolCode);
@@ -67,6 +67,8 @@ class MarketDataSyncService
                       ->delete();
                 }
             }
+
+            return true;
         } catch (\Exception $e) {
             SymbolQuote::query()
                        ->where('symbol_code', $symbolCode)
@@ -77,6 +79,8 @@ class MarketDataSyncService
                        ]);
 
             report($e);
+
+            return false;
         }
     }
 }
