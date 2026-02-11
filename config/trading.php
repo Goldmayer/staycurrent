@@ -23,7 +23,7 @@ return [
          * Total threshold for opening a trade.
          * Default: 8
          */
-        'total_threshold' => 8,
+        'total_threshold' => 6,
 
         /*
          * Flat market detection settings.
@@ -34,13 +34,13 @@ return [
              * Number of recent candles to look back for flat detection.
              * Default: 12
              */
-            'lookback_candles' => 8,
+            'lookback_candles' => 12,
 
             /*
              * Percentage threshold for flat detection.
              * Default: 0.002 (0.2%)
              */
-            'range_pct_threshold' => 0.0008,
+            'range_pct_threshold' => 0.00018,
         ],
 
         /*
@@ -52,8 +52,24 @@ return [
              * Whether to use the current candle for entry decisions.
              * Default: true
              */
-            'use_current_candle' => false,
+            'use_current_candle' => true,
         ],
+        'entry_confirm' => [
+            // какие TF вообще разрешено использовать как TF_entry
+            'allowed_entry_tfs' => ['15m', '30m', '1h', '4h'],
+
+            // сколько старших TF должно быть в ту же сторону
+            'min_seniors_in_dir' => [
+                '15m' => 3,
+                '30m' => 2,
+                '1h'  => 1,
+                '4h'  => 1,
+            ],
+
+            // требуем ли совпадение следующего младшего TF
+            'require_lower_tf_confirmation' => true,
+        ],
+
 
         /*
          * Weights for timeframes.
@@ -145,14 +161,14 @@ return [
         ],
 
         'price_windows' => [
-            'dir_flat_threshold_pct' => 0.0001,
+            'dir_flat_threshold_pct' => 0.00005,
             'timeframes' => [
-                '5m'  => ['minutes' => 5,    'points' => 5],
-                '15m' => ['minutes' => 15,   'points' => 10],
-                '30m' => ['minutes' => 30,   'points' => 20],
-                '1h'  => ['minutes' => 60,   'points' => 40],
-                '4h'  => ['minutes' => 240,  'points' => 160],
-                '1d'  => ['minutes' => 1440, 'points' => 960],
+                '5m' => ['minutes' => 5,    'points' => 2],
+                '15m' => ['minutes' => 15,   'points' => 5],
+                '30m' => ['minutes' => 30,   'points' => 10],
+                '1h' => ['minutes' => 60,   'points' => 20],
+                '4h' => ['minutes' => 240,  'points' => 20],
+                '1d' => ['minutes' => 1440, 'points' => 20],
             ],
         ],
 
@@ -173,10 +189,7 @@ return [
             'min_profit_to_trail_pct' => 0.0005, // 0.05%
         ],
 
-
     ],
-
-
 
     /*
     |--------------------------------------------------------------------------
