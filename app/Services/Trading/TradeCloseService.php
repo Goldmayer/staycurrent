@@ -7,8 +7,12 @@ use App\Enums\TradeStatus;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
+use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Filament\Notifications\Notification;
+use Illuminate\Support\Facades\Log;
+use App\Services\Notifications\SignalNotificationService;
 
 class TradeCloseService
 {
@@ -250,13 +254,23 @@ class TradeCloseService
                             'r_multiple' => $rMultiple,
                         ];
 
-                        $trade->status = TradeStatus::CLOSED;
+                        $trade->status = TradeStatus::CLOSED->value;
                         $trade->closed_at = now();
                         $trade->exit_price = $exitPrice;
                         $trade->realized_points = $realizedPoints;
                         $trade->unrealized_points = 0;
                         $trade->meta = $meta;
                         $trade->save();
+
+                        // Send Filament database notification for closed trade
+                        $user = User::query()->orderBy('id')->first();
+                        if ($user) {
+                            Notification::make()
+                                ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                                ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                                ->warning()
+                                ->sendToDatabase($user);
+                        }
 
                         $exitStopHit++;
                         $closed++;
@@ -301,13 +315,23 @@ class TradeCloseService
                         'r_multiple' => $rMultiple,
                     ];
 
-                    $trade->status = TradeStatus::CLOSED;
+                    $trade->status = TradeStatus::CLOSED->value;
                     $trade->closed_at = now();
                     $trade->exit_price = $exitPrice;
                     $trade->realized_points = $realizedPoints;
                     $trade->unrealized_points = 0;
                     $trade->meta = $meta;
                     $trade->save();
+
+                    // Send Filament database notification for closed trade
+                    $user = User::query()->orderBy('id')->first();
+                    if ($user) {
+                        Notification::make()
+                            ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                            ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                            ->warning()
+                            ->sendToDatabase($user);
+                    }
 
                     $closed++;
                     return;
@@ -394,13 +418,23 @@ class TradeCloseService
                         ],
                     ];
 
-                    $trade->status = TradeStatus::CLOSED;
+                    $trade->status = TradeStatus::CLOSED->value;
                     $trade->closed_at = now();
                     $trade->exit_price = $exitPrice;
                     $trade->realized_points = $realizedPoints;
                     $trade->unrealized_points = 0;
                     $trade->meta = $meta;
                     $trade->save();
+
+                    // Send Filament database notification for closed trade
+                    $user = User::query()->orderBy('id')->first();
+                    if ($user) {
+                        Notification::make()
+                            ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                            ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                            ->warning()
+                            ->sendToDatabase($user);
+                    }
 
                     $closed++;
                     return;
@@ -546,5 +580,31 @@ class TradeCloseService
 
         $next = $order[$i + 1] ?? null;
         return is_string($next) ? $next : null;
+    }
+
+    private function notifyProviderError(\Throwable $e, string $symbolCode): void
+    {
+        $notificationService = app(SignalNotificationService::class);
+
+        $notificationService->notify([
+            'type' => 'provider_error',
+            'title' => 'Provider error',
+            'message' => 'Market data provider request failed',
+            'level' => 'warning',
+            'symbol' => $symbolCode,
+            'timeframe' => null,
+            'reason' => $e->getMessage(),
+            'happened_at' => now()->toISOString(),
+        ]);
+
+        // Send Filament database notification
+        $user = User::query()->orderBy('id')->first();
+        if ($user) {
+            Notification::make()
+                ->title("DATA PROVIDER ERROR")
+                ->body($e->getMessage())
+                ->danger()
+                ->sendToDatabase($user);
+        }
     }
 }

@@ -20,6 +20,17 @@
                 >
                     Primary
                 </button>
+                <button
+                    type="button"
+                    class="inline-flex items-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                    onclick="window.dispatchEvent(new CustomEvent('open-modal', { detail: { id: 'database-notifications' } }))"
+
+                >
+                    <svg class="mr-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-5 5v-5zM10.5 3.75l4.5 4.5-4.5 4.5"></path>
+                    </svg>
+                    Notifications
+                </button>
             </div>
         </header>
 

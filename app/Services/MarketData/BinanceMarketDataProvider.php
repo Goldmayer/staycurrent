@@ -3,9 +3,13 @@
 namespace App\Services\MarketData;
 
 use App\Contracts\MarketDataProvider;
+use App\Models\User;
+use App\Services\Notifications\SignalNotificationService;
 use Carbon\CarbonImmutable;
+use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class BinanceMarketDataProvider implements MarketDataProvider
 {
@@ -35,9 +39,7 @@ class BinanceMarketDataProvider implements MarketDataProvider
 
             return null;
         } catch (\Throwable $e) {
-            Log::error('[Binance] lastPrice failed for ' . $symbolCode, [
-                'exception' => $e->getMessage()
-            ]);
+            $this->notifyProviderError($e, $symbolCode);
             return null;
         }
     }
@@ -93,9 +95,7 @@ class BinanceMarketDataProvider implements MarketDataProvider
 
             return $candles;
         } catch (\Throwable $e) {
-            Log::error('[Binance] candles failed for ' . $symbolCode, [
-                'exception' => $e->getMessage()
-            ]);
+            $this->notifyProviderError($e, $symbolCode);
             return [];
         }
     }
@@ -112,5 +112,31 @@ class BinanceMarketDataProvider implements MarketDataProvider
         ];
 
         return $durations[$timeframeCode] ?? (60 * 60 * 1000);
+    }
+
+    private function notifyProviderError(\Throwable $e, string $symbolCode): void
+    {
+        $notificationService = app(SignalNotificationService::class);
+
+        $notificationService->notify([
+            'type' => 'provider_error',
+            'title' => 'Provider error',
+            'message' => 'Binance provider request failed',
+            'level' => 'warning',
+            'symbol' => $symbolCode,
+            'timeframe' => null,
+            'reason' => $e->getMessage(),
+            'happened_at' => now()->toISOString(),
+        ]);
+
+        // Send Filament database notification
+        $user = User::query()->orderBy('id')->first();
+        if ($user) {
+            Notification::make()
+                ->title("DATA PROVIDER ERROR")
+                ->body($e->getMessage())
+                ->danger()
+                ->sendToDatabase($user);
+        }
     }
 }

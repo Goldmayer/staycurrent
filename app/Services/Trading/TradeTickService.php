@@ -8,6 +8,10 @@ use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 use App\Models\TradeMonitor;
+use App\Models\User;
+use App\Services\Notifications\SignalNotificationService;
+use Filament\Notifications\Notification;
+use Illuminate\Support\Facades\Log;
 
 class TradeTickService
 {
@@ -15,6 +19,7 @@ class TradeTickService
         private readonly TradeDecisionService $decision,
         private readonly StrategySettingsRepository $settings,
         private readonly FxSessionScheduler $fxSessionScheduler,
+        private readonly SignalNotificationService $signalNotification,
     ) {
     }
 
@@ -298,7 +303,7 @@ class TradeTickService
 
             $expectation = "WAIT: entry={$entryTf} lower={$lowerTf} want={$wanted} lower_now={$lowerNow} seniors={$cnt}/{$req}";
 
-            TradeMonitor::updateOrCreate(
+            $monitor = TradeMonitor::updateOrCreate(
                 [
                     'symbol_code' => $symbolCode,
                     'timeframe_code' => $entryTf,
@@ -308,6 +313,32 @@ class TradeTickService
                     'expectation' => $expectation,
                 ]
             );
+
+            // Notify if state changed
+            if ($monitor->wasChanged('expectation') && $monitor->last_notified_state !== $expectation) {
+                $this->signalNotification->notify([
+                    'type' => 'waiting',
+                    'title' => 'Waiting for entry',
+                    'message' => "Waiting for {$symbolCode} {$entryTf} to confirm reversal",
+                    'level' => 'info',
+                    'symbol' => $symbolCode,
+                    'timeframe' => $entryTf,
+                    'reason' => $expectation,
+                    'happened_at' => now()->toISOString(),
+                ]);
+
+                // Send Filament database notification
+                $user = User::query()->orderBy('id')->first();
+                if ($user) {
+                    Notification::make()
+                        ->title("WAITING {$symbolCode} {$entryTf}")
+                        ->body("Reason: {$expectation}")
+                        ->sendToDatabase($user);
+                }
+
+                $monitor->last_notified_state = $expectation;
+                $monitor->save();
+            }
         }
 
         $waitingTfs = array_values(array_unique(array_filter($waitingTfs, fn ($x) => is_string($x) && $x !== '')));
@@ -379,6 +410,42 @@ class TradeTickService
             ],
         ]);
 
+        // Send Filament database notification for opened trade
+        $user = User::query()->orderBy('id')->first();
+        if ($user) {
+            Notification::make()
+                ->title("OPEN {$trade->symbol_code} {$trade->timeframe_code}")
+                ->body("Side: {$trade->side} | Price: {$trade->entry_price}")
+                ->success()
+                ->sendToDatabase($user);
+        }
+
         return (int) $trade->id;
+    }
+
+    private function notifyProviderError(\Throwable $e, string $symbolCode): void
+    {
+        $notificationService = app(SignalNotificationService::class);
+
+        $notificationService->notify([
+            'type' => 'provider_error',
+            'title' => 'Provider error',
+            'message' => 'Market data provider request failed',
+            'level' => 'warning',
+            'symbol' => $symbolCode,
+            'timeframe' => null,
+            'reason' => $e->getMessage(),
+            'happened_at' => now()->toISOString(),
+        ]);
+
+        // Send Filament database notification
+        $user = User::query()->orderBy('id')->first();
+        if ($user) {
+            Notification::make()
+                ->title("DATA PROVIDER ERROR")
+                ->body($e->getMessage())
+                ->danger()
+                ->sendToDatabase($user);
+        }
     }
 }

@@ -91,9 +91,11 @@
         {{ $slot }}
         @livewireScripts
         @filamentScripts
-        @livewire('notifications')
         @vite('resources/js/app.js')
 
         @fluxScripts
+
+        @livewire('notifications')
+        @livewire('database-notifications')
     </body>
 </html>

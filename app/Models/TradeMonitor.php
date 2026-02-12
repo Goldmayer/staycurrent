@@ -12,6 +12,7 @@ class TradeMonitor extends Model
         'timeframe_code',
         'expectation',
         'open_trade_id',
+        'last_notified_state',
     ];
 
     protected $casts = [

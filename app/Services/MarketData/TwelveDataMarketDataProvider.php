@@ -3,9 +3,13 @@
 namespace App\Services\MarketData;
 
 use App\Contracts\MarketDataProvider;
+use App\Models\User;
+use App\Services\Notifications\SignalNotificationService;
 use Carbon\CarbonImmutable;
+use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class TwelveDataMarketDataProvider implements MarketDataProvider
 {
@@ -163,7 +167,34 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
 
             throw $e;
         } catch (\Throwable $e) {
+            $this->notifyProviderError($e);
             return null;
+        }
+    }
+
+    private function notifyProviderError(\Throwable $e): void
+    {
+        $notificationService = app(SignalNotificationService::class);
+
+        $notificationService->notify([
+            'type' => 'provider_error',
+            'title' => 'Provider error',
+            'message' => 'TwelveData provider request failed',
+            'level' => 'warning',
+            'symbol' => null,
+            'timeframe' => null,
+            'reason' => $e->getMessage(),
+            'happened_at' => now()->toISOString(),
+        ]);
+
+        // Send Filament database notification
+        $user = User::query()->orderBy('id')->first();
+        if ($user) {
+            Notification::make()
+                ->title("DATA PROVIDER ERROR")
+                ->body($e->getMessage())
+                ->danger()
+                ->sendToDatabase($user);
         }
     }
 }
