@@ -120,6 +120,25 @@ class TradeDecisionService
         );
 
         if ($entryDecision['action'] === 'open') {
+            // M5 direction confirmation
+            $m5Dir = $dirs['5m'] ?? null;
+            if ($m5Dir !== $wantedDir) {
+                return [
+                    'action' => 'hold',
+                    'reason' => 'waiting_m5_reversal',
+                    'debug' => array_merge([
+                        'vote_total' => $total,
+                        'dirs' => $dirs,
+                        'windows' => $windows,
+                        'insufficient_ticks' => $insufficientTicks,
+                        'wanted_dir' => $wantedDir,
+                        'entry_tf' => $entryDecision['timeframe_code'],
+                        'm5_dir' => $m5Dir,
+                        'expected_dir' => $wantedDir,
+                    ], $entryDebug),
+                ];
+            }
+
             return [
                 'action' => 'open',
                 'reason' => 'strategy_entry',
