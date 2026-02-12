@@ -23,7 +23,7 @@ return [
          * Total threshold for opening a trade.
          * Default: 8
          */
-        'total_threshold' => 8,
+        'total_threshold' => 6,
 
         /*
          * Flat market detection settings.
@@ -53,6 +53,12 @@ return [
              * Default: true
              */
             'use_current_candle' => true,
+
+            /*
+             * Pending entry distance in points.
+             * Default: 10
+             */
+            'pending_distance_points' => 10,
         ],
         'entry_confirm' => [
             // какие TF вообще разрешено использовать как TF_entry
