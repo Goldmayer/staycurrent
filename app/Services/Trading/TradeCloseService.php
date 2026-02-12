@@ -38,8 +38,8 @@ class TradeCloseService
         $distancePointsFallback = (float) ($trailingCfg['distance_points'] ?? 25);
 
         // price-only exit config
-        $exitCfg = (array) config('trading.exit', []);
-        $exitFlatThresholdPct = (float) (config('trading.price_windows.dir_flat_threshold_pct', 0.0001));
+        $exitCfg = (array) config('trading.strategy.exit', []);
+        $exitFlatThresholdPct = (float) (config('trading.strategy.price_windows.dir_flat_threshold_pct', 0.0001));
 
         $exitReversalMinStrengthPct = (float) ($exitCfg['reversal_min_strength_pct'] ?? 0.00015);
         $exitArmingMode = (string) ($exitCfg['exit_mode'] ?? 'market'); // market only for now
@@ -348,7 +348,7 @@ class TradeCloseService
                     return;
                 }
 
-                $tfCfg = (array) (config("trading.price_windows.timeframes.{$exitTf}") ?? []);
+                $tfCfg = (array) (config("trading.strategy.price_windows.timeframes.{$exitTf}") ?? []);
                 $minutes = (int) ($tfCfg['minutes'] ?? 0);
                 $points = (int) ($tfCfg['points'] ?? 0);
 
