@@ -23,7 +23,7 @@ return [
          * Total threshold for opening a trade.
          * Default: 8
          */
-        'total_threshold' => 6,
+        'total_threshold' => 8,
 
         /*
          * Flat market detection settings.
@@ -62,14 +62,13 @@ return [
             'min_seniors_in_dir' => [
                 '15m' => 3,
                 '30m' => 2,
-                '1h'  => 1,
-                '4h'  => 1,
+                '1h' => 1,
+                '4h' => 1,
             ],
 
             // требуем ли совпадение следующего младшего TF
             'require_lower_tf_confirmation' => true,
         ],
-
 
         /*
          * Weights for timeframes.
@@ -106,7 +105,7 @@ return [
              * Take profit points (fallback, used only if take_profit_percent is 0).
              * Default: 60
              */
-            'take_profit_points' => 0,
+            'take_profit_points' => 100,
 
             /*
              * Take profit percent of ENTRY price.
@@ -271,7 +270,6 @@ return [
                 'cooldown_minutes' => 120,
             ],
         ],
-
         /*
          * Currency to sessions mapping
          * Each currency code maps to an array of session names that affect it

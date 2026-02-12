@@ -96,6 +96,5 @@
         @fluxScripts
 
         @livewire('notifications')
-        @livewire('database-notifications')
     </body>
 </html>
