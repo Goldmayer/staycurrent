@@ -103,7 +103,6 @@
         {{-- @livewire(\App\Filament\Widgets\SymbolPnlCardsWidget::class) --}}
 
         @include('dashboard._refresh-progress')
-        <livewire:dashboard.toast-notifications />
 
         <livewire:dashboard.trades-monitor />
         <livewire:dashboard.trades-waiting />
