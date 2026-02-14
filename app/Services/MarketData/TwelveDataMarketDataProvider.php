@@ -186,10 +186,15 @@ class TwelveDataMarketDataProvider implements MarketDataProvider
             'reason' => $e->getMessage(),
             'happened_at' => now()->toISOString(),
         ]);
-
+        Notification::make()
+                    ->title("DATA PROVIDER ERROR")
+                    ->body($e->getMessage())
+                    ->danger()
+                    ->send();
         // Send Filament database notification
         $user = User::query()->orderBy('id')->first();
         if ($user) {
+
             Notification::make()
                 ->title("DATA PROVIDER ERROR")
                 ->body($e->getMessage())

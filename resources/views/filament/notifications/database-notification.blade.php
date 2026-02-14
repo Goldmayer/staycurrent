@@ -102,6 +102,8 @@
     } elseif (is_string($date) && trim($date) !== '') {
         $ago = \Illuminate\Support\Carbon::parse($date)->diffForHumans();
     }
+
+
 @endphp
 
 

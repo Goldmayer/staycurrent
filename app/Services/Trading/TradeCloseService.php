@@ -8,11 +8,10 @@ use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 use App\Models\User;
+use App\Services\Notifications\SignalNotificationService;
+use Filament\Notifications\Notification;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Filament\Notifications\Notification;
-use Illuminate\Support\Facades\Log;
-use App\Services\Notifications\SignalNotificationService;
 
 class TradeCloseService
 {
@@ -21,8 +20,7 @@ class TradeCloseService
     public function __construct(
         private readonly StrategySettingsRepository $settings,
         private readonly PriceWindowService $priceWindows,
-    ) {
-    }
+    ) {}
 
     public function process(?int $limit = null): array
     {
@@ -45,8 +43,8 @@ class TradeCloseService
         $exitArmingMode = (string) ($exitCfg['exit_mode'] ?? 'market'); // market only for now
 
         $query = Trade::query()
-                      ->where('status', TradeStatus::OPEN->value)
-                      ->orderBy('id');
+            ->where('status', TradeStatus::OPEN->value)
+            ->orderBy('id');
 
         if ($limit) {
             $query->limit($limit);
@@ -92,49 +90,53 @@ class TradeCloseService
             ) {
                 /** @var Trade|null $trade */
                 $trade = Trade::query()
-                              ->whereKey($tradeRow->id)
-                              ->where('status', TradeStatus::OPEN->value)
-                              ->lockForUpdate()
-                              ->first();
+                    ->whereKey($tradeRow->id)
+                    ->where('status', TradeStatus::OPEN->value)
+                    ->lockForUpdate()
+                    ->first();
 
-                if (!$trade) {
+                if (! $trade) {
                     return;
                 }
 
                 $quote = SymbolQuote::query()
-                                    ->where('symbol_code', $trade->symbol_code)
-                                    ->first();
+                    ->where('symbol_code', $trade->symbol_code)
+                    ->first();
 
-                if (!$quote || $quote->price === null) {
+                if (! $quote || $quote->price === null) {
                     $skippedMissingQuote++;
+
                     return;
                 }
 
                 $mostRecentTimestamp = $this->mostRecentQuoteTimestamp($quote);
-                if (!$mostRecentTimestamp || $mostRecentTimestamp->lt(now()->subMinutes(self::QUOTE_FRESH_MINUTES))) {
+                if (! $mostRecentTimestamp || $mostRecentTimestamp->lt(now()->subMinutes(self::QUOTE_FRESH_MINUTES))) {
                     $skippedStaleQuote++;
+
                     return;
                 }
 
                 $priceNow = (float) $quote->price;
 
                 $symbol = $symbolCache[$trade->symbol_code] ?? null;
-                if ($symbol === null && !array_key_exists($trade->symbol_code, $symbolCache)) {
+                if ($symbol === null && ! array_key_exists($trade->symbol_code, $symbolCache)) {
                     $symbol = Symbol::query()
-                                    ->where('code', $trade->symbol_code)
-                                    ->first();
+                        ->where('code', $trade->symbol_code)
+                        ->first();
 
                     $symbolCache[$trade->symbol_code] = $symbol;
                 }
 
-                if (!$symbol) {
+                if (! $symbol) {
                     $skippedMissingSymbol++;
+
                     return;
                 }
 
                 $pointSize = (float) $symbol->point_size;
                 if ($pointSize <= 0) {
                     $skippedMissingSymbol++;
+
                     return;
                 }
 
@@ -261,10 +263,15 @@ class TradeCloseService
                         $trade->unrealized_points = 0;
                         $trade->meta = $meta;
                         $trade->save();
-
+                        Notification::make()
+                            ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                            ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                            ->warning()
+                            ->send();
                         // Send Filament database notification for closed trade
                         $user = User::query()->orderBy('id')->first();
                         if ($user) {
+
                             Notification::make()
                                 ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
                                 ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
@@ -274,6 +281,7 @@ class TradeCloseService
 
                         $exitStopHit++;
                         $closed++;
+
                         return;
                     }
                 }
@@ -322,10 +330,15 @@ class TradeCloseService
                     $trade->unrealized_points = 0;
                     $trade->meta = $meta;
                     $trade->save();
-
+                    Notification::make()
+                        ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                        ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                        ->warning()
+                        ->send();
                     // Send Filament database notification for closed trade
                     $user = User::query()->orderBy('id')->first();
                     if ($user) {
+
                         Notification::make()
                             ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
                             ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
@@ -334,6 +347,7 @@ class TradeCloseService
                     }
 
                     $closed++;
+
                     return;
                 }
 
@@ -345,6 +359,7 @@ class TradeCloseService
 
                 if ($exitTf === null) {
                     $held++;
+
                     return;
                 }
 
@@ -354,6 +369,7 @@ class TradeCloseService
 
                 if ($minutes <= 0 || $points <= 0) {
                     $held++;
+
                     return;
                 }
 
@@ -370,8 +386,9 @@ class TradeCloseService
                 $currOk = (bool) ($curr['is_complete'] ?? false);
                 $prevOk = (bool) ($prev['is_complete'] ?? false);
 
-                if (!$currOk || !$prevOk) {
+                if (! $currOk || ! $prevOk) {
                     $held++;
+
                     return;
                 }
 
@@ -425,10 +442,15 @@ class TradeCloseService
                     $trade->unrealized_points = 0;
                     $trade->meta = $meta;
                     $trade->save();
-
+                    Notification::make()
+                        ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
+                        ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
+                        ->warning()
+                        ->send();
                     // Send Filament database notification for closed trade
                     $user = User::query()->orderBy('id')->first();
                     if ($user) {
+
                         Notification::make()
                             ->title("CLOSE {$trade->symbol_code} {$trade->timeframe_code}")
                             ->body("PnL: {$realizedPoints} ({$unrealizedPoints} pips)")
@@ -437,6 +459,7 @@ class TradeCloseService
                     }
 
                     $closed++;
+
                     return;
                 }
 
@@ -579,6 +602,7 @@ class TradeCloseService
         }
 
         $next = $order[$i + 1] ?? null;
+
         return is_string($next) ? $next : null;
     }
 
@@ -596,15 +620,20 @@ class TradeCloseService
             'reason' => $e->getMessage(),
             'happened_at' => now()->toISOString(),
         ]);
-
+        Notification::make()
+            ->title('DATA PROVIDER ERROR')
+            ->body($e->getMessage())
+            ->danger()
+            ->send();
         // Send Filament database notification
         $user = User::query()->orderBy('id')->first();
         if ($user) {
             Notification::make()
-                ->title("DATA PROVIDER ERROR")
+                ->title('DATA PROVIDER ERROR')
                 ->body($e->getMessage())
                 ->danger()
-                ->sendToDatabase($user);
+                ->sendToDatabase($user)
+                ->send();
         }
     }
 }

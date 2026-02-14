@@ -1,6 +1,6 @@
 <x-layouts::app :title="__('Dashboard')">
 
-    <section class="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <section class="mx-auto w-full pb-6">
         <header class="mb-4 flex items-start justify-between gap-3">
             <div>
                 <h1 class="text-base font-semibold text-slate-900">Dashboard</h1>
@@ -21,11 +21,10 @@
                     Primary
                 </button>
                 <livewire:filament.livewire.database-notifications />
-
             </div>
         </header>
 
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 hidden">
             <!-- Card -->
             <article class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
                 <div class="flex items-center justify-between">
@@ -81,14 +80,12 @@
                 <p class="mt-1 text-xs text-slate-500">Secondary text</p>
             </article>
 
-            <!-- Wide block example (optional): spans 3 cols on lg -->
             <article class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm lg:col-span-3">
                 <p class="text-xs font-medium text-slate-500">Wide panel</p>
                 <div class="mt-2 h-24 rounded-lg border border-dashed border-slate-200 bg-slate-50"></div>
                 <p class="mt-2 text-xs text-slate-500">Put chart/table/etc here.</p>
             </article>
 
-            <!-- Another wide block (optional): spans 3 cols on lg -->
             <article class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm lg:col-span-3">
                 <p class="text-xs font-medium text-slate-500">Wide panel</p>
                 <div class="mt-2 h-24 rounded-lg border border-dashed border-slate-200 bg-slate-50"></div>
@@ -96,20 +93,20 @@
             </article>
         </div>
     </section>
+
+    <div class="mb-6 hidden">
+        @livewire('dashboard.world-clocks')
+    </div>
+
     <div class="flex h-full w-full flex-1 flex-col gap-4 rounded-xl">
-
         @livewire(\App\Filament\Widgets\TradingKpiWidget::class)
-{{--        @livewire(\App\Filament\Widgets\SymbolPnlCardsWidget::class)--}}
-
+        {{-- @livewire(\App\Filament\Widgets\SymbolPnlCardsWidget::class) --}}
 
         @include('dashboard._refresh-progress')
-        <livewire:dashboard.trades-monitor />
-<livewire:dashboard.trades-waiting />
-        <livewire:dashboard.trades-history />
+        <livewire:dashboard.toast-notifications />
 
+        <livewire:dashboard.trades-monitor />
+        <livewire:dashboard.trades-waiting />
+        <livewire:dashboard.trades-history />
     </div>
-    <div
-        wire:poll.60s="$dispatch('dashboard-refresh')"
-        class="hidden"
-    ></div>
 </x-layouts::app>

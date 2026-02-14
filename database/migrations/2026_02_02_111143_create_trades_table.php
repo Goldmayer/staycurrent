@@ -19,7 +19,7 @@ return new class extends Migration
             $table->string('side')->index();
             $table->string('status')->index();
 
-            $table->timestamp('opened_at')->index();
+            $table->timestamp('opened_at')->nullable()->index();
             $table->timestamp('closed_at')->nullable()->index();
 
             $table->decimal('entry_price', 16, 8);

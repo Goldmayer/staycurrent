@@ -4,14 +4,11 @@ namespace App\Services\Trading;
 
 use App\Contracts\StrategySettingsRepository;
 use App\Enums\TradeStatus;
-use App\Models\PendingOrder;
 use App\Models\Symbol;
 use App\Models\SymbolQuote;
 use App\Models\Trade;
 use App\Models\TradeMonitor;
-use App\Models\User;
 use App\Services\Notifications\SignalNotificationService;
-use Filament\Notifications\Notification;
 
 class TradeTickService
 {
@@ -92,9 +89,9 @@ class TradeTickService
         }
 
         $symbols = Symbol::query()
-            ->where('is_active', true)
-            ->whereIn('code', $symbolCodes)
-            ->get();
+                         ->where('is_active', true)
+                         ->whereIn('code', $symbolCodes)
+                         ->get();
 
         if ($symbols->isEmpty()) {
             return [
@@ -111,34 +108,30 @@ class TradeTickService
         $symbolList = $symbols->pluck('code')->all();
 
         $quotes = SymbolQuote::query()
-            ->whereIn('symbol_code', $symbolList)
-            ->get()
-            ->keyBy('symbol_code');
+                             ->whereIn('symbol_code', $symbolList)
+                             ->get()
+                             ->keyBy('symbol_code');
 
         $openTrades = Trade::query()
-            ->whereIn('symbol_code', $symbolList)
-            ->where('status', TradeStatus::OPEN->value)
-            ->get(['id', 'symbol_code', 'timeframe_code']);
+                           ->whereIn('symbol_code', $symbolList)
+                           ->where('status', TradeStatus::OPEN->value)
+                           ->get(['id', 'symbol_code', 'timeframe_code']);
 
         $openTradeSet = [];
-        $hasAnyOpenTradeBySymbol = [];
-
         foreach ($openTrades as $t) {
             $k = (string) $t->symbol_code.'|'.(string) $t->timeframe_code;
             $openTradeSet[$k] = (int) $t->id;
-            $hasAnyOpenTradeBySymbol[(string) $t->symbol_code] = true;
         }
 
-        // Get existing pending orders for these symbols
-        $existingPendings = PendingOrder::query()
-            ->whereIn('symbol_code', $symbolList)
-            ->get()
-            ->keyBy(function ($pending) {
-                return $pending->symbol_code.'|'.$pending->timeframe_code;
-            });
+        $existingPendings = Trade::query()
+                                 ->whereIn('symbol_code', $symbolList)
+                                 ->where('status', 'pending')
+                                 ->get(['id', 'symbol_code', 'timeframe_code', 'side', 'entry_price', 'meta', 'status'])
+                                 ->keyBy(fn ($trade) => $trade->symbol_code.'|'.$trade->timeframe_code)->all();
 
-        $risk = $this->settings->get()['risk'] ?? [];
-        $entry = $this->settings->get()['entry'] ?? [];
+        $settings = $this->settings->get();
+        $risk = (array) ($settings['risk'] ?? []);
+        $entry = (array) ($settings['entry'] ?? []);
 
         $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);
         $tpPercent = (float) ($risk['take_profit_percent'] ?? 0.0);
@@ -160,47 +153,155 @@ class TradeTickService
 
             $quotePulledAt = $this->formatQuotePulledAt($quote);
 
+            // 1) Force open (market)
             if ($forceOpen) {
-                if (! $forceSide || ! $forceTimeframe) {
+                $fs = $forceSide ? strtolower(trim((string) $forceSide)) : null;
+                $ftf = $forceTimeframe ? strtolower(trim((string) $forceTimeframe)) : null;
+
+                if (! $fs || ! in_array($fs, ['buy', 'sell'], true) || ! $ftf) {
                     $tradesSkipped++;
                     $skipped['invalid_force_params']++;
 
                     continue;
                 }
 
+                $timeframeCode = (string) $ftf;
+                $side = (string) $fs;
+
+                $openKey = $symbol->code.'|'.$timeframeCode;
+                if (isset($openTradeSet[$openKey])) {
+                    $tradesSkipped++;
+                    $skipped['existing_open_trade']++;
+
+                    continue;
+                }
+
+                $pointSize = (float) $symbol->point_size;
+                if ($pointSize <= 0) {
+                    $tradesSkipped++;
+                    $skipped['invalid_point_size']++;
+
+                    continue;
+                }
+
+                $entryPrice = (float) $currentPrice;
+
+                $fallbackSlPoints = (float) ($risk['stop_loss_points'] ?? 20);
+                $fallbackTpPoints = (float) ($risk['take_profit_points'] ?? 0);
+
+                $stopLossPoints = $slPercent > 0
+                    ? round(($entryPrice * $slPercent) / $pointSize, 2)
+                    : $fallbackSlPoints;
+
+                $takeProfitPoints = $tpPercent > 0
+                    ? round(($entryPrice * $tpPercent) / $pointSize, 2)
+                    : $fallbackTpPoints;
+
+                if ($stopLossPoints <= 0) {
+                    $stopLossPoints = $fallbackSlPoints;
+                }
+                if ($takeProfitPoints <= 0) {
+                    $takeProfitPoints = $fallbackTpPoints;
+                }
+
                 $decision = [
                     'action' => 'open',
-                    'side' => $forceSide,
-                    'timeframe_code' => $forceTimeframe,
+                    'side' => $side,
+                    'timeframe_code' => $timeframeCode,
                     'reason' => 'forced_open',
                     'debug' => [
                         'forced' => true,
-                        'force_side' => $forceSide,
-                        'force_tf' => $forceTimeframe,
+                        'force_side' => $side,
+                        'force_tf' => $timeframeCode,
                     ],
                 ];
-            } else {
-                $decision = $this->decision->decideOpen($symbol->code);
+
+                $hash = crc32($symbol->code.'|'.$timeframeCode.'|'.$side.'|forced');
+
+                $tradeId = $this->openTrade(
+                    symbolCode: $symbol->code,
+                    timeframeCode: $timeframeCode,
+                    side: $side,
+                    entryPrice: $entryPrice,
+                    quotePulledAt: $quotePulledAt,
+                    hash: $hash,
+                    decision: $decision,
+                    stopLossPoints: $stopLossPoints,
+                    takeProfitPoints: $takeProfitPoints,
+                    maxHoldMinutes: $maxHoldCfg,
+                    pointSize: $pointSize,
+                    stopLossPercent: $slPercent,
+                    takeProfitPercent: $tpPercent,
+                    forced: true
+                );
+
+                $tradesOpened++;
+                $openTradeSet[$openKey] = $tradeId;
+
+                $this->clearWaitingMonitorForSymbolTf($symbol->code, $timeframeCode);
+
+                continue;
             }
 
-            // ✅ Persist WAIT:* statuses for symbols even if they have open trades on OTHER TFs.
-            // This only touches open_trade_id IS NULL rows, so it won't overwrite "open trade" monitors.
-            if (! $forceOpen) {
-                $this->persistWaitingMonitorsFromDecision($symbol->code, $decision);
+            // 2) Normal decision path
+            $decision = $this->decision->decideOpen($symbol->code);
+
+            // WAIT monitors (UI only)
+            $this->persistWaitingMonitorsFromDecision($symbol->code, $decision);
+
+            // 3) Always try to fill existing pending trades (independent of decision)
+            $pendingsForSymbol = collect($existingPendings)
+                ->filter(fn ($p) => (string) $p->symbol_code === (string) $symbol->code);
+
+            foreach ($pendingsForSymbol as $pendingKey => $pending) {
+                $decisionForFill = (array) (data_get($pending->meta, 'decision') ?? []);
+                if ($decisionForFill === []) {
+                    $decisionForFill = ['reason' => 'pending_fill'];
+                }
+
+                $filled = $this->tryFillPendingTrade(
+                    pending: $pending,
+                    currentPrice: (float) $currentPrice,
+                    symbol: $symbol,
+                    decision: $decisionForFill,
+                    risk: $risk,
+                    quotePulledAt: $quotePulledAt
+                );
+
+                if ($filled) {
+                    $pendingsFilled++;
+                    $tradesOpened++;
+
+                    unset($existingPendings[$pendingKey]);
+
+                    $ok = $symbol->code.'|'.(string) $pending->timeframe_code;
+                    $openTradeSet[$ok] = (int) $pending->id;
+
+                    $this->clearWaitingMonitorForSymbolTf($symbol->code, (string) $pending->timeframe_code);
+                }
             }
 
-            // Check if we're in a trading window for new entries
-            if (! $forceOpen && ! $this->fxSessionScheduler->isInTradingWindow($symbol->code, now())) {
+            // 4) If not in trading window, do not create/update NEW pendings
+            if (! $this->fxSessionScheduler->isInTradingWindow($symbol->code, now())) {
                 $tradesSkipped++;
                 $skipped['session_closed']++;
 
                 continue;
             }
 
+            // 5) Cancel pendings by strategy signal (only when decision is not open)
             if (($decision['action'] ?? 'hold') !== 'open') {
-                // Cancel pending orders for this symbol when decision is 'hold'
-                $cancelled = $this->cancelPendingOrdersForSymbol($symbol->code, $existingPendings);
-                $pendingsCancelled += $cancelled;
+                $reason = (string) ($decision['reason'] ?? '');
+
+                if ($reason === 'waiting_m5_reversal') {
+                    $wantedDir = (string) ($decision['debug']['wanted_dir'] ?? '');
+
+                    if ($wantedDir === 'up') {
+                        $pendingsCancelled += $this->cancelPendingBySide($symbol->code, 'buy', $existingPendings);
+                    } elseif ($wantedDir === 'down') {
+                        $pendingsCancelled += $this->cancelPendingBySide($symbol->code, 'sell', $existingPendings);
+                    }
+                }
 
                 $tradesSkipped++;
                 $skipped['decision_hold']++;
@@ -208,8 +309,16 @@ class TradeTickService
                 continue;
             }
 
+            // 6) Decision says "open" => we CREATE/UPDATE pending trade (not market open)
             $timeframeCode = (string) ($decision['timeframe_code'] ?? '');
             $side = (string) ($decision['side'] ?? '');
+
+            if ($timeframeCode === '' || $side === '') {
+                $tradesSkipped++;
+                $skipped['decision_hold']++;
+
+                continue;
+            }
 
             $openKey = $symbol->code.'|'.$timeframeCode;
             if (isset($openTradeSet[$openKey])) {
@@ -227,30 +336,9 @@ class TradeTickService
                 continue;
             }
 
-            // Check if pending order exists and fill it if price is reached
             $pendingKey = $symbol->code.'|'.$timeframeCode;
-            $existingPending = $existingPendings[$pendingKey] ?? null;
 
-            if ($existingPending) {
-                $filled = $this->tryFillPendingOrder($existingPending, $currentPrice, $symbol, $decision, $risk);
-                if ($filled) {
-                    $pendingsFilled++;
-                    $tradesOpened++;
-
-                    // Remove from existing pendings since it was filled
-                    unset($existingPendings[$pendingKey]);
-
-                    // ✅ If we opened trade on TF, ensure any WAIT:* monitor for that TF is cleared (open_trade_id is NULL monitors)
-                    if (! $forceOpen) {
-                        $this->clearWaitingMonitorForSymbolTf($symbol->code, $timeframeCode);
-                    }
-
-                    continue;
-                }
-            }
-
-            // Create or update pending order (ONLY when something meaningful changed)
-            $changed = $this->ensurePendingOrder(
+            $createdOrUpdated = $this->ensurePendingTrade(
                 symbol: $symbol,
                 timeframeCode: $timeframeCode,
                 side: $side,
@@ -260,16 +348,14 @@ class TradeTickService
                 decision: $decision
             );
 
-            if ($changed) {
+            if ($createdOrUpdated) {
                 $pendingsCreated++;
-            }
 
-            // Update existing pendings collection if we created/updated
-            if ($changed) {
-                $existingPendings[$pendingKey] = PendingOrder::query()
-                    ->where('symbol_code', $symbol->code)
-                    ->where('timeframe_code', $timeframeCode)
-                    ->first();
+                $existingPendings[$pendingKey] = Trade::query()
+                                                      ->where('symbol_code', $symbol->code)
+                                                      ->where('timeframe_code', $timeframeCode)
+                                                      ->where('status', 'pending')
+                                                      ->first();
             }
         }
 
@@ -289,107 +375,10 @@ class TradeTickService
         if (! $quote) {
             return null;
         }
+
         $val = $quote->pulled_at ?? $quote->updated_at ?? null;
 
-        return $val instanceof \DateTimeInterface ? $val->format('Y-m-d H:i:s') : (string) $val;
-    }
-
-    /**
-     * Persist WAIT:* statuses for "waiting_lower_reversal" (open_trade_id must stay NULL).
-     * Also clears stale WAIT:* statuses for this symbol when waiting is no longer present.
-     */
-    private function persistWaitingMonitorsFromDecision(string $symbolCode, array $decision): void
-    {
-        $reason = (string) ($decision['reason'] ?? '');
-        $debug = (array) ($decision['debug'] ?? []);
-        $waiting = (array) ($debug['waiting_entries'] ?? []);
-
-        if ($reason !== 'waiting_lower_reversal' || $waiting === []) {
-            // Clear only WAIT:* (do not touch other statuses)
-            TradeMonitor::query()
-                ->where('symbol_code', $symbolCode)
-                ->whereNull('open_trade_id')
-                ->where('expectation', 'like', 'WAIT:%')
-                ->update(['expectation' => null]);
-
-            return;
-        }
-
-        $waitingTfs = [];
-
-        foreach ($waiting as $w) {
-            $entryTf = (string) ($w['entry_tf'] ?? '');
-            if ($entryTf === '') {
-                continue;
-            }
-
-            $waitingTfs[] = $entryTf;
-
-            $wanted = strtoupper((string) ($w['wanted_dir'] ?? ''));
-            $lowerNow = strtoupper((string) ($w['lower_dir_now'] ?? ''));
-            $lowerTf = (string) ($w['lower_tf'] ?? '');
-            $req = (string) ($w['required_seniors'] ?? '');
-            $cnt = (string) ($w['seniors_in_dir_count'] ?? '');
-
-            $expectation = "WAIT: entry={$entryTf} lower={$lowerTf} want={$wanted} lower_now={$lowerNow} seniors={$cnt}/{$req}";
-
-            $monitor = TradeMonitor::updateOrCreate(
-                [
-                    'symbol_code' => $symbolCode,
-                    'timeframe_code' => $entryTf,
-                ],
-                [
-                    'open_trade_id' => null,
-                    'expectation' => $expectation,
-                ]
-            );
-
-            // Notify if state changed
-            if ($monitor->wasChanged('expectation') && $monitor->last_notified_state !== $expectation) {
-                $this->signalNotification->notify([
-                    'type' => 'waiting',
-                    'title' => 'Waiting for entry',
-                    'message' => "Waiting for {$symbolCode} {$entryTf} to confirm reversal",
-                    'level' => 'info',
-                    'symbol' => $symbolCode,
-                    'timeframe' => $entryTf,
-                    'reason' => $expectation,
-                    'happened_at' => now()->toISOString(),
-                ]);
-
-                // Send Filament database notification
-                $user = User::query()->orderBy('id')->first();
-                if ($user) {
-                    Notification::make()
-                        ->title("WAITING {$symbolCode} {$entryTf}")
-                        ->body("Reason: {$expectation}")
-                        ->sendToDatabase($user);
-                }
-
-                $monitor->last_notified_state = $expectation;
-                $monitor->save();
-            }
-        }
-
-        $waitingTfs = array_values(array_unique(array_filter($waitingTfs, fn ($x) => is_string($x) && $x !== '')));
-
-        // Clear stale WAIT:* rows for this symbol not in current waiting list
-        TradeMonitor::query()
-            ->where('symbol_code', $symbolCode)
-            ->whereNull('open_trade_id')
-            ->where('expectation', 'like', 'WAIT:%')
-            ->when($waitingTfs !== [], fn ($q) => $q->whereNotIn('timeframe_code', $waitingTfs))
-            ->update(['expectation' => null]);
-    }
-
-    private function clearWaitingMonitorForSymbolTf(string $symbolCode, string $timeframeCode): void
-    {
-        TradeMonitor::query()
-            ->where('symbol_code', $symbolCode)
-            ->where('timeframe_code', $timeframeCode)
-            ->whereNull('open_trade_id')
-            ->where('expectation', 'like', 'WAIT:%')
-            ->update(['expectation' => null]);
+        return $val instanceof \DateTimeInterface ? $val->format('Y-m-d H:i:s') : null;
     }
 
     private function openTrade(
@@ -440,24 +429,35 @@ class TradeTickService
             ],
         ]);
 
-        // Send Filament database notification for opened trade
-        $user = User::query()->orderBy('id')->first();
-        if ($user) {
-            Notification::make()
-                ->title("OPEN {$trade->symbol_code} {$trade->timeframe_code}")
-                ->body("Side: {$trade->side} | Price: {$trade->entry_price}")
-                ->success()
-                ->sendToDatabase($user);
-        }
+        $this->signalNotification->notify([
+            'title' => "OPEN {$trade->symbol_code} {$trade->timeframe_code}",
+            'message' => "Side: {$trade->side} | Price: {$trade->entry_price}",
+            'level' => 'success',
+        ]);
 
         return (int) $trade->id;
     }
 
-    /**
-     * Ensure a pending order exists for the given symbol/timeframe/side.
-     * Creates new or updates existing pending order ONLY when side/entry_price changes.
-     */
-    private function ensurePendingOrder(
+    private function calculatePendingEntryPrice(string $side, float $currentPrice, float $pointSize, int $pendingDistancePoints): float
+    {
+        return match ($side) {
+            'buy' => $currentPrice + ($pendingDistancePoints * $pointSize),
+            'sell' => $currentPrice - ($pendingDistancePoints * $pointSize),
+            default => $currentPrice,
+        };
+    }
+
+    private function stableDecisionHash(array $decision): int
+    {
+        $core = $decision;
+        unset($core['debug']);
+
+        $json = json_encode($core, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return (int) crc32($json ?: '');
+    }
+
+    private function ensurePendingTrade(
         Symbol $symbol,
         string $timeframeCode,
         string $side,
@@ -466,146 +466,124 @@ class TradeTickService
         int $pendingDistancePoints,
         array $decision
     ): bool {
-        $entryPrice = $this->calculatePendingEntryPrice($side, $currentPrice, $pointSize, $pendingDistancePoints);
+        $decisionHash = $this->stableDecisionHash($decision);
 
-        /** @var PendingOrder|null $pending */
-        $pending = PendingOrder::query()
-            ->where('symbol_code', $symbol->code)
-            ->where('timeframe_code', $timeframeCode)
-            ->first();
+        $existing = Trade::query()
+                         ->where('symbol_code', $symbol->code)
+                         ->where('timeframe_code', $timeframeCode)
+                         ->where('status', 'pending')
+                         ->first();
 
-        // Create
-        if (! $pending) {
-            $pending = PendingOrder::create([
+        $newMeta = [
+            'source' => 'pending_pipeline',
+            'decision' => $decision,
+            'decision_hash' => $decisionHash,
+            'point_size' => $pointSize,
+            'pending_distance_points' => $pendingDistancePoints,
+        ];
+
+        if (! $existing) {
+            $entryPrice = $this->calculatePendingEntryPrice($side, $currentPrice, $pointSize, $pendingDistancePoints);
+
+            Trade::create([
                 'symbol_code' => $symbol->code,
                 'timeframe_code' => $timeframeCode,
                 'side' => $side,
+                'status' => 'pending',
                 'entry_price' => $entryPrice,
-                'meta' => [
-                    'created_at' => now()->toISOString(),
-                    'decision' => $decision,
-                    'point_size' => $pointSize,
-                    'pending_distance_points' => $pendingDistancePoints,
-                ],
+                'opened_at' => null,
+                'meta' => $newMeta,
             ]);
 
             $this->signalNotification->notify([
-                'type' => 'pending_created',
-                'title' => 'Pending order created',
+                'title' => 'Pending trade created',
                 'message' => "Pending {$symbol->code} {$timeframeCode} {$side} at {$entryPrice}",
                 'level' => 'info',
-                'symbol' => $symbol->code,
-                'timeframe' => $timeframeCode,
-                'reason' => "Entry: {$entryPrice}",
-                'happened_at' => now()->toISOString(),
             ]);
-
-            $user = User::query()->orderBy('id')->first();
-            if ($user) {
-                Notification::make()
-                    ->title("PENDING {$symbol->code} {$timeframeCode}")
-                    ->body("Side: {$side} | Entry: {$entryPrice}")
-                    ->info()
-                    ->sendToDatabase($user);
-            }
 
             return true;
         }
 
-        // Update ONLY if meaningful fields changed (avoid meta churn/spam)
-        $existingSide = (string) $pending->side;
-        $existingEntry = (float) $pending->entry_price;
+        $changed = false;
 
-        $entryChanged = round($existingEntry, 8) !== round((float) $entryPrice, 8);
-        $sideChanged = $existingSide !== $side;
+        $prevMeta = (array) ($existing->meta ?? []);
+        $prevDecisionHash = (int) ($prevMeta['decision_hash'] ?? 0);
 
-        if (! $entryChanged && ! $sideChanged) {
+        if ((string) $existing->side !== $side) {
+            $existing->side = $side;
+            $existing->entry_price = $this->calculatePendingEntryPrice($side, $currentPrice, $pointSize, $pendingDistancePoints);
+            $changed = true;
+        }
+
+        if ($prevDecisionHash !== $decisionHash) {
+            $existing->meta = $newMeta;
+            $changed = true;
+        }
+
+        if (! $changed) {
             return false;
         }
 
-        $prevEntry = $existingEntry;
-        $prevSide = $existingSide;
+        $existing->opened_at = null;
+        $existing->save();
 
-        $pending->side = $side;
-        $pending->entry_price = $entryPrice;
-        $pending->save();
+        $entryPrice = (float) $existing->entry_price;
 
         $this->signalNotification->notify([
-            'type' => 'pending_updated',
-            'title' => 'Pending order updated',
-            'message' => "Pending {$symbol->code} {$timeframeCode} {$side} at {$entryPrice}",
+            'title' => 'Pending trade updated',
+            'message' => "Pending {$symbol->code} {$timeframeCode} {$existing->side} at {$entryPrice}",
             'level' => 'info',
-            'symbol' => $symbol->code,
-            'timeframe' => $timeframeCode,
-            'reason' => "Prev: {$prevSide} {$prevEntry} -> New: {$side} {$entryPrice}",
-            'happened_at' => now()->toISOString(),
         ]);
-
-        $user = User::query()->orderBy('id')->first();
-        if ($user) {
-            Notification::make()
-                ->title("PENDING {$symbol->code} {$timeframeCode}")
-                ->body("Side: {$side} | Entry: {$entryPrice}")
-                ->info()
-                ->sendToDatabase($user);
-        }
 
         return true;
     }
 
-    /**
-     * Calculate pending entry price based on current price and distance.
-     */
-    private function calculatePendingEntryPrice(string $side, float $currentPrice, float $pointSize, int $pendingDistancePoints): float
-    {
-        if ($side === 'buy') {
-            return $currentPrice + ($pendingDistancePoints * $pointSize);
-        } elseif ($side === 'sell') {
-            return $currentPrice - ($pendingDistancePoints * $pointSize);
-        }
-
-        return $currentPrice;
-    }
-
-    /**
-     * Try to fill a pending order if current price reaches entry price.
-     */
-    private function tryFillPendingOrder(
-        PendingOrder $pending,
+    private function tryFillPendingTrade(
+        Trade $pending,
         float $currentPrice,
         Symbol $symbol,
         array $decision,
-        array $risk
+        array $risk,
+        ?string $quotePulledAt
     ): bool {
-        $entryPrice = (float) $pending->entry_price;
-        $side = (string) $pending->side;
-
-        // Check if price has reached entry level
-        $shouldFill = false;
-
-        if ($side === 'buy' && $currentPrice >= $entryPrice) {
-            $shouldFill = true;
-        } elseif ($side === 'sell' && $currentPrice <= $entryPrice) {
-            $shouldFill = true;
+        $rawStatus = (string) ($pending->getRawOriginal('status') ?? '');
+        if ($rawStatus !== 'pending') {
+            return false;
         }
+
+        $rawEntry = (string) ($pending->getRawOriginal('entry_price') ?? '');
+        $entryPrice = (float) $rawEntry;
+
+        $side = (string) ($pending->getRawOriginal('side') ?? $pending->side ?? '');
+
+        $shouldFill = match ($side) {
+            'buy' => $currentPrice >= $entryPrice,
+            'sell' => $currentPrice <= $entryPrice,
+            default => false,
+        };
 
         if (! $shouldFill) {
             return false;
         }
 
-        // Calculate risk parameters
+        $pointSize = (float) $symbol->point_size;
+        if ($pointSize <= 0) {
+            return false;
+        }
+
         $fallbackSlPoints = (float) ($risk['stop_loss_points'] ?? 20);
         $fallbackTpPoints = (float) ($risk['take_profit_points'] ?? 0);
+
         $slPercent = (float) ($risk['stop_loss_percent'] ?? 0.003);
         $tpPercent = (float) ($risk['take_profit_percent'] ?? 0.0);
         $maxHoldCfg = (int) ($risk['max_hold_minutes'] ?? 120);
 
         $stopLossPoints = $slPercent > 0
-            ? round(($entryPrice * $slPercent) / $symbol->point_size, 2)
+            ? round(($entryPrice * $slPercent) / $pointSize, 2)
             : $fallbackSlPoints;
 
         $takeProfitPoints = $tpPercent > 0
-            ? round(($entryPrice * $tpPercent) / $symbol->point_size, 2)
+            ? round(($entryPrice * $tpPercent) / $pointSize, 2)
             : $fallbackTpPoints;
 
         if ($stopLossPoints <= 0) {
@@ -615,102 +593,160 @@ class TradeTickService
             $takeProfitPoints = $fallbackTpPoints;
         }
 
-        $hash = crc32($symbol->code.'|'.$pending->timeframe_code.'|'.$side);
+        $hash = crc32((string) $pending->symbol_code.'|'.(string) $pending->timeframe_code.'|'.$side.'|pending_fill');
 
-        // Open the trade
-        $tradeId = $this->openTrade(
-            symbolCode: $symbol->code,
-            timeframeCode: $pending->timeframe_code,
-            side: $side,
-            entryPrice: $entryPrice,
-            quotePulledAt: null, // Will be set in openTrade
-            hash: $hash,
-            decision: $decision,
-            stopLossPoints: $stopLossPoints,
-            takeProfitPoints: $takeProfitPoints,
-            maxHoldMinutes: $maxHoldCfg,
-            pointSize: (float) $symbol->point_size,
-            stopLossPercent: $slPercent,
-            takeProfitPercent: $tpPercent,
-            forced: false
-        );
+        $pending->status = TradeStatus::OPEN->value;
+        $pending->opened_at = now();
+        $pending->stop_loss_points = $stopLossPoints;
+        $pending->take_profit_points = $takeProfitPoints;
+        $pending->max_hold_minutes = $maxHoldCfg;
 
-        // Delete the pending order
-        $pending->delete();
+        $pending->meta = [
+            'source' => 'trade:tick',
+            'open' => [
+                'source' => 'trade:tick',
+                'forced' => false,
+                'reason' => (string) ($decision['reason'] ?? 'pending_fill'),
+                'timeframe' => (string) $pending->timeframe_code,
+                'quote_pulled_at' => $quotePulledAt,
+                'hash' => $hash,
+                'decision' => $decision,
+            ],
+            'risk' => [
+                'stop_loss_points' => $stopLossPoints,
+                'take_profit_points' => $takeProfitPoints,
+                'max_hold_minutes' => $maxHoldCfg,
+                'stop_loss_percent' => $slPercent,
+                'take_profit_percent' => $tpPercent,
+                'point_size' => $pointSize,
+            ],
+        ];
+
+        $pending->save();
+
+        $this->signalNotification->notify([
+            'title' => "OPEN {$pending->symbol_code} {$pending->timeframe_code}",
+            'message' => "Side: {$pending->side} | Price: {$pending->entry_price}",
+            'level' => 'success',
+        ]);
 
         return true;
     }
 
-    /**
-     * Cancel pending orders for a symbol when decision is 'hold'.
-     */
-    private function cancelPendingOrdersForSymbol(string $symbolCode, &$existingPendings): int
+    private function cancelPendingBySide(string $symbolCode, string $side, array &$existingPendings): int
     {
+        $pendings = Trade::query()
+                         ->where('symbol_code', $symbolCode)
+                         ->where('side', $side)
+                         ->where('status', 'pending')
+                         ->get(['id', 'symbol_code', 'timeframe_code']);
+
         $cancelled = 0;
 
-        $pendings = PendingOrder::query()
-            ->where('symbol_code', $symbolCode)
-            ->get();
-
         foreach ($pendings as $pending) {
-            $pending->delete();
-            $cancelled++;
+            $key = (string) $pending->symbol_code.'|'.(string) $pending->timeframe_code;
 
-            // Remove from existing pendings collection
-            $key = $pending->symbol_code.'|'.$pending->timeframe_code;
+            $pending->delete();
             unset($existingPendings[$key]);
+
+            $cancelled++;
         }
 
         if ($cancelled > 0) {
-            // Notify about cancellation
             $this->signalNotification->notify([
-                'type' => 'pending_cancelled',
-                'title' => 'Pending orders cancelled',
-                'message' => "Cancelled {$cancelled} pending orders for {$symbolCode}",
+                'title' => "PENDING CANCELLED {$symbolCode}",
+                'message' => "Cancelled {$cancelled} {$side} pending trades",
                 'level' => 'warning',
-                'symbol' => $symbolCode,
-                'timeframe' => null,
-                'reason' => 'Decision changed to hold',
-                'happened_at' => now()->toISOString(),
             ]);
-
-            // Send Filament database notification
-            $user = User::query()->orderBy('id')->first();
-            if ($user) {
-                Notification::make()
-                    ->title("PENDING CANCELLED {$symbolCode}")
-                    ->body("Cancelled {$cancelled} pending orders")
-                    ->warning()
-                    ->sendToDatabase($user);
-            }
         }
 
         return $cancelled;
     }
 
+    private function persistWaitingMonitorsFromDecision(string $symbolCode, array $decision): void
+    {
+        $reason = (string) ($decision['reason'] ?? '');
+        $debug = (array) ($decision['debug'] ?? []);
+        $waiting = (array) ($debug['waiting_entries'] ?? []);
+
+        if ($reason !== 'waiting_lower_reversal' || $waiting === []) {
+            TradeMonitor::query()
+                        ->where('symbol_code', $symbolCode)
+                        ->whereNull('open_trade_id')
+                        ->where('expectation', 'like', 'WAIT:%')
+                        ->update(['expectation' => null]);
+
+            return;
+        }
+
+        $waitingTfs = [];
+
+        foreach ($waiting as $w) {
+            $entryTf = (string) ($w['entry_tf'] ?? '');
+            if ($entryTf === '') {
+                continue;
+            }
+
+            $waitingTfs[] = $entryTf;
+
+            $wanted = strtoupper((string) ($w['wanted_dir'] ?? ''));
+            $lowerNow = strtoupper((string) ($w['lower_dir_now'] ?? ''));
+            $lowerTf = (string) ($w['lower_tf'] ?? '');
+            $req = (string) ($w['required_seniors'] ?? '');
+            $cnt = (string) ($w['seniors_in_dir_count'] ?? '');
+
+            $expectation = "WAIT: entry={$entryTf} lower={$lowerTf} want={$wanted} lower_now={$lowerNow} seniors={$cnt}/{$req}";
+
+            $monitor = TradeMonitor::updateOrCreate(
+                [
+                    'symbol_code' => $symbolCode,
+                    'timeframe_code' => $entryTf,
+                ],
+                [
+                    'open_trade_id' => null,
+                    'expectation' => $expectation,
+                ]
+            );
+
+            if ($monitor->wasChanged('expectation') && $monitor->last_notified_state !== $expectation) {
+                $this->signalNotification->notify([
+                    'title' => "WAITING {$symbolCode} {$entryTf}",
+                    'message' => "Reason: {$expectation}",
+                    'level' => 'info',
+                ]);
+
+                $monitor->last_notified_state = $expectation;
+                $monitor->save();
+            }
+        }
+
+        $waitingTfs = array_values(array_unique(array_filter($waitingTfs, fn ($x) => is_string($x) && $x !== '')));
+
+        TradeMonitor::query()
+                    ->where('symbol_code', $symbolCode)
+                    ->whereNull('open_trade_id')
+                    ->where('expectation', 'like', 'WAIT:%')
+                    ->when($waitingTfs !== [], fn ($q) => $q->whereNotIn('timeframe_code', $waitingTfs))
+                    ->update(['expectation' => null]);
+    }
+
+    private function clearWaitingMonitorForSymbolTf(string $symbolCode, string $timeframeCode): void
+    {
+        TradeMonitor::query()
+                    ->where('symbol_code', $symbolCode)
+                    ->where('timeframe_code', $timeframeCode)
+                    ->whereNull('open_trade_id')
+                    ->where('expectation', 'like', 'WAIT:%')
+                    ->update(['expectation' => null]);
+    }
+
     private function notifyProviderError(\Throwable $e, string $symbolCode): void
     {
-        $notificationService = app(SignalNotificationService::class);
-
-        $notificationService->notify([
-            'type' => 'provider_error',
-            'title' => 'Provider error',
-            'message' => 'Market data provider request failed',
-            'level' => 'warning',
-            'symbol' => $symbolCode,
-            'timeframe' => null,
-            'reason' => $e->getMessage(),
-            'happened_at' => now()->toISOString(),
+        $this->signalNotification->notify([
+            'title' => 'DATA PROVIDER ERROR',
+            'message' => $e->getMessage(),
+            'level' => 'danger',
         ]);
-
-        // Send Filament database notification
-        $user = User::query()->orderBy('id')->first();
-        if ($user) {
-            Notification::make()
-                ->title('DATA PROVIDER ERROR')
-                ->body($e->getMessage())
-                ->danger()
-                ->sendToDatabase($user);
-        }
     }
 }
+

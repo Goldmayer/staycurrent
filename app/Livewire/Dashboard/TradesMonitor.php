@@ -2,7 +2,6 @@
 
 namespace App\Livewire\Dashboard;
 
-use App\Models\Candle;
 use App\Models\Trade;
 use App\Services\Trading\FxSyncModeService;
 use App\Services\Trading\PriceWindowService;
@@ -17,7 +16,6 @@ use Filament\Tables\Contracts\HasTable;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Contracts\View\View;
-use Illuminate\Support\Str;
 use Livewire\Component;
 
 class TradesMonitor extends Component implements HasActions, HasForms, HasTable
@@ -137,27 +135,18 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
         return $ageSeconds > $thresholdSeconds;
     }
 
+    private function tradeStatus(Trade $record): string
+    {
+        return $record->status instanceof \BackedEnum ? $record->status->value : (string) $record->status;
+    }
+
     public function table(Table $table): Table
     {
         $this->debug_total_records = Trade::count();
 
-        $query = Trade::query()
-            ->where('status', 'open')
-            ->with([
-                'symbol.quotes',
-            ])
-            ->addSelect([
-                'last_candle_open_time_ms' => Candle::query()
-                    ->selectRaw('MAX(open_time_ms)')
-                    ->whereColumn('candles.symbol_code', 'trades.symbol_code')
-                    ->whereColumn('candles.timeframe_code', 'trades.timeframe_code'),
-            ]);
-
-        $this->debug_table_records_count = (clone $query)->count();
-
         return $table
-            ->query($query)->poll('5s')
-            ->defaultPaginationPageOption(10)
+            ->query(Trade::query()->whereIn('status', ['open', 'pending'])->with(['symbol.quotes']))
+            ->poll('5s')->defaultPaginationPageOption(10)
             ->paginationPageOptions([10, 25, 50])
             ->filters([
                 SelectFilter::make('symbol_code')
@@ -213,6 +202,9 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                         if ($value === 'open') {
                             return 'info';
                         }
+                        if ($value === 'pending') {
+                            return 'warning';
+                        }
                         if ($value === 'closed') {
                             return 'gray';
                         }
@@ -245,6 +237,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                 TextColumn::make('entry_reason')
                     ->label('Entry Reason')
                     ->getStateUsing(function (Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return 'Pending order waiting for fill';
+                        }
+
                         $decision = data_get($record->meta, 'open.decision');
 
                         if (! $decision) {
@@ -281,7 +278,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                 TextColumn::make('unrealized_points')
                     ->label('Unrealized (pts)')
-                    ->formatStateUsing(function ($state): string {
+                    ->formatStateUsing(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return '—';
+                        }
                         if ($state === null) {
                             return '—';
                         }
@@ -289,7 +290,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                         return ($v > 0 ? '+' : '').number_format($v, 2);
                     })
-                    ->color(function ($state): string {
+                    ->color(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return 'gray';
+                        }
                         if ($state === null) {
                             return 'gray';
                         }
@@ -308,6 +313,10 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                 TextColumn::make('unrealized_r')->toggleable(isToggledHiddenByDefault: true)
                     ->label('Unrealized (R)')
                     ->getStateUsing(function (Trade $record): ?float {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return null;
+                        }
                         $risk = (float) ($record->stop_loss_points ?? 0);
                         if ($risk <= 0) {
                             return null;
@@ -317,7 +326,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                         return round($u / $risk, 2);
                     })
-                    ->formatStateUsing(function ($state): string {
+                    ->formatStateUsing(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return '—';
+                        }
                         if ($state === null) {
                             return '—';
                         }
@@ -325,7 +338,11 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                         return ($v > 0 ? '+' : '').number_format($v, 2);
                     })
-                    ->color(function ($state): string {
+                    ->color(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return 'gray';
+                        }
                         if ($state === null) {
                             return 'gray';
                         }
@@ -343,6 +360,10 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                 TextColumn::make('sl_left_points')
                     ->label('SL left')
                     ->getStateUsing(function (Trade $record): ?float {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return null;
+                        }
                         $priceNow = (float) ($record->symbol?->quotes?->price ?? 0);
                         $pointSize = (float) ($record->symbol?->point_size ?? 0);
 
@@ -376,8 +397,22 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
 
                         return round($left, 2);
                     })
-                    ->formatStateUsing(fn ($state) => $state === null ? '—' : number_format((float) $state, 2))
-                    ->color(function ($state): string {
+                    ->formatStateUsing(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return '—';
+                        }
+                        if ($state === null) {
+                            return '—';
+                        }
+
+                        return number_format((float) $state, 2);
+                    })
+                    ->color(function ($state, Trade $record): string {
+                        $status = $this->tradeStatus($record);
+                        if ($status === 'pending') {
+                            return 'gray';
+                        }
                         if ($state === null) {
                             return 'gray';
                         }
@@ -394,6 +429,10 @@ class TradesMonitor extends Component implements HasActions, HasForms, HasTable
                         default => 'gray',
                     })
                     ->getStateUsing(function (Trade $record): ?string {
+                        if ($this->tradeStatus($record) === 'pending') {
+                            return '—';
+                        }
+
                         $entryTf = (string) ($record->timeframe_code ?? '');
                         $lowerTf = match ($entryTf) {
                             '1d' => '4h',

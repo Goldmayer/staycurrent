@@ -4,6 +4,7 @@ namespace App\Services\Notifications;
 
 use App\Models\User;
 use Filament\Notifications\Notification;
+use Illuminate\Notifications\DatabaseNotification;
 
 class SignalNotificationService
 {
@@ -15,17 +16,42 @@ class SignalNotificationService
             return;
         }
 
-        $notification = Notification::make()
-                                    ->title((string) ($payload['title'] ?? 'Notification'))
-                                    ->body((string) ($payload['message'] ?? ''));
+        $title = (string) ($payload['title'] ?? 'Notification');
+        $body = (string) ($payload['message'] ?? '');
+        $level = (string) ($payload['level'] ?? 'info');
 
-        match ($payload['level'] ?? 'info') {
+        if ($title === '' && $body === '') {
+            return;
+        }
+
+        $exists = DatabaseNotification::query()
+                                      ->where('notifiable_type', User::class)
+                                      ->where('notifiable_id', $user->id)
+                                      ->where('data->title', $title)
+                                      ->where('data->body', $body)
+                                      ->exists();
+
+        if ($exists) {
+            return;
+        }
+
+        $notification = Notification::make()
+                                    ->title($title)
+                                    ->body($body);
+
+        match ($level) {
             'success' => $notification->success(),
             'warning' => $notification->warning(),
-            'danger'  => $notification->danger(),
-            default   => $notification->info(),
+            'danger', 'error' => $notification->danger(),
+            default => $notification->info(),
         };
 
-        $notification->sendToDatabase($user);
+        $notification->send();
+
+        $notification->sendToDatabase($user, [
+            'title' => $title,
+            'body' => $body,
+            'level' => $level,
+        ]);
     }
 }
